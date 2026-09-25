@@ -1,6 +1,6 @@
 # macOS 兼容状态
 
-已完成代码适配，尚未在 macOS 真机或 CI 上执行验收，没有生成 Mac 安装包。
+已完成代码适配，v0.3.0 已通过 Windows 和 macOS 的 CI 编译、单元测试与浏览器界面测试（[运行记录](https://github.com/Hessel2333/RallyCut/actions/runs/36118892585)）。尚未在 Mac 真机验证播放和硬件编码，没有生成 Mac 安装包。
 
 - FFmpeg/ffprobe 使用无 `.exe` 的可执行文件名；支持手动路径、应用 tools 目录、环境变量、PATH，以及 `/opt/homebrew/bin`、`/usr/local/bin`。
 - H.264 / H.265 分别短测 `h264_videotoolbox` / `hevc_videotoolbox`，禁止把 VideoToolbox 软件回退误报为硬件可用。失败时按同一编码格式回退 libx264 / libx265，FFmpeg 必须包含相应编码器。
