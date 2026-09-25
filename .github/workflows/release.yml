@@ -27,6 +27,7 @@ jobs:
       - run: npx playwright install chromium
       - run: npm run test:e2e
       - run: npm test
+      - run: node --test scripts/finalize-update.test.mjs
       - run: npm run build
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - uses: tauri-apps/tauri-action@v1
@@ -43,6 +44,11 @@ jobs:
           prerelease: false
           args: --bundles nsis -- --locked
           updaterJsonPreferNsis: true
+      - name: Use public updater downloads
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
+        run: node scripts/finalize-update.mjs
       - name: Publish complete release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
