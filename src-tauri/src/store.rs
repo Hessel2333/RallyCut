@@ -241,7 +241,7 @@ mod tests {
             .get("export_preferences", "main")
             .unwrap();
         assert_eq!(loaded.current.bitrate_kbps, 15000);
-        assert_eq!(loaded.presets[2].name, "我的1080p");
+        assert_eq!(loaded.presets.last().unwrap().name, "我的1080p");
     }
     #[test]
     fn persistence() {

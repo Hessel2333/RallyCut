@@ -49,6 +49,7 @@ import { jobMatchesCurrent, remaining } from "./jobs";
 import { UpdateCenter } from "./UpdateCenter";
 
 const defaultPreset: Preset = {
+  codec: "hevc",
   width: 3840,
   height: 2160,
   bitrate_kbps: 20000,
@@ -1236,6 +1237,7 @@ export default function App() {
                         </small>
                       )}
                       <small>
+                        {j.preset.codec === "hevc" ? "H.265" : "H.264"} ·{" "}
                         {j.preset.width} × {j.preset.height} ·{" "}
                         {j.preset.force_60 ? "60 fps" : "源帧率"} ·{" "}
                         {j.preset.bitrate_kbps} kbps
@@ -1817,6 +1819,22 @@ export default function App() {
                     </select>
                   </label>
                   <label>
+                    视频编码
+                    <select
+                      value={preset.codec}
+                      onChange={(e) =>
+                        setPreset({
+                          ...preset,
+                          codec: e.target.value as Preset["codec"],
+                          encoder: "auto",
+                        })
+                      }
+                    >
+                      <option value="hevc">H.265 / HEVC（日常）</option>
+                      <option value="h264">H.264 / AVC（兼容）</option>
+                    </select>
+                  </label>
+                  <label>
                     编码器
                     <select
                       value={preset.encoder}
@@ -1825,10 +1843,16 @@ export default function App() {
                       }
                     >
                       <option value="auto">自动（已实测硬件优先）</option>
-                      <option value="libx264">CPU · H.264</option>
-                      {hardware.map((h) => (
-                        <option key={h}>{h}</option>
-                      ))}
+                      <option
+                        value={preset.codec === "hevc" ? "libx265" : "libx264"}
+                      >
+                        CPU · {preset.codec === "hevc" ? "H.265" : "H.264"}
+                      </option>
+                      {hardware
+                        .filter((h) => h.startsWith(preset.codec + "_"))
+                        .map((h) => (
+                          <option key={h}>{h}</option>
+                        ))}
                     </select>
                   </label>
                 </div>
@@ -1846,7 +1870,8 @@ export default function App() {
                   我确认色彩信息缺失的素材为普通 SDR，非 HDR / D-Log
                 </label>
                 <p className="muted">
-                  H.264 · AAC {preset.audio_kbps} kbps · 保持比例并补边 ·
+                  {preset.codec === "hevc" ? "H.265" : "H.264"} · AAC{" "}
+                  {preset.audio_kbps} kbps · 保持比例并补边 ·
                   多音轨素材采用第一条音轨
                 </p>
                 <p className="muted">

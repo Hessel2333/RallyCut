@@ -220,25 +220,29 @@ pub struct Tools {
     pub ffprobe: Tool,
 }
 pub fn discover(configured: &str, name: &str, data: &Path) -> Tool {
+    let executable = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.into()
+    };
     let mut candidates = vec![];
     if !configured.is_empty() {
         candidates.push(configured.to_string());
     } else {
         candidates.push(
             data.join("tools")
-                .join(format!("{name}.exe"))
+                .join(&executable)
                 .to_string_lossy()
                 .into(),
         );
         if let Ok(d) = std::env::var("RALLYCUT_FFMPEG_DIR") {
-            candidates.push(
-                Path::new(&d)
-                    .join(format!("{name}.exe"))
-                    .to_string_lossy()
-                    .into(),
-            );
+            candidates.push(Path::new(&d).join(&executable).to_string_lossy().into());
         }
         candidates.push(name.into());
+        #[cfg(target_os = "macos")]
+        for root in ["/opt/homebrew/bin", "/usr/local/bin"] {
+            candidates.push(Path::new(root).join(name).to_string_lossy().into());
+        }
     }
     for p in &candidates {
         if let Ok(o) = command(p).arg("-version").output() {
@@ -262,32 +266,42 @@ pub fn discover(configured: &str, name: &str, data: &Path) -> Tool {
     }
 }
 pub fn hardware(ffmpeg: &str) -> Vec<String> {
-    ["h264_nvenc", "h264_qsv", "h264_amf"]
-        .into_iter()
-        .filter(|encoder| {
-            command(ffmpeg)
-                .args([
-                    "-v",
-                    "error",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "color=size=1280x720:rate=60",
-                    "-frames:v",
-                    "3",
-                    "-an",
-                    "-c:v",
-                    encoder,
-                    "-f",
-                    "null",
-                    "-",
-                ])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-        .map(str::to_string)
-        .collect()
+    [
+        "h264_nvenc",
+        "hevc_nvenc",
+        "h264_qsv",
+        "hevc_qsv",
+        "h264_amf",
+        "hevc_amf",
+        "h264_videotoolbox",
+        "hevc_videotoolbox",
+    ]
+    .into_iter()
+    .filter(|encoder| {
+        let mut cmd = command(ffmpeg);
+        cmd.args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=size=1280x720:rate=60",
+            "-frames:v",
+            "3",
+            "-an",
+            "-c:v",
+            encoder,
+        ]);
+        if encoder.ends_with("_videotoolbox") {
+            cmd.args(["-allow_sw", "0"]);
+        }
+        cmd.args(["-f", "null", "-"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+    .map(str::to_string)
+    .collect()
 }
 pub fn natural_key(s: &str) -> String {
     let mut out = String::new();

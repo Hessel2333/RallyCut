@@ -51,7 +51,7 @@ pub fn build_args(job: &Job, encoder: &str, partial: &Path) -> Result<Vec<String
     {
         return Err("导出参数超出支持范围".into());
     }
-    if !["libx264", "h264_nvenc", "h264_qsv", "h264_amf"].contains(&encoder) {
+    if !p.accepts_encoder(encoder) {
         return Err("不支持的编码器".into());
     }
     let first = job
@@ -116,6 +116,12 @@ pub fn build_args(job: &Job, encoder: &str, partial: &Path) -> Result<Vec<String
         "{concat}concat=n={}:v=1:a=1[v][a]",
         job.segment.ranges.len()
     ));
+    if p.codec == "hevc" {
+        args.extend(["-tag:v".into(), "hvc1".into()]);
+    }
+    if encoder.ends_with("_videotoolbox") {
+        args.extend(["-allow_sw".into(), "0".into()]);
+    }
     args.extend([
         "-filter_complex".into(),
         filters.join(";"),
@@ -239,7 +245,11 @@ pub fn export(
         .map(|r| r.end_us - r.start_us)
         .sum();
     let encoder = if job.preset.encoder == "auto" {
-        hardware.first().map(String::as_str).unwrap_or("libx264")
+        hardware
+            .iter()
+            .find(|e| job.preset.accepts_encoder(e))
+            .map(String::as_str)
+            .unwrap_or(job.preset.cpu_encoder())
     } else {
         job.preset.encoder.as_str()
     }
@@ -268,12 +278,12 @@ pub fn export(
         });
         if let Err(e) = first {
             if job.preset.encoder == "auto"
-                && encoder != "libx264"
+                && encoder != job.preset.cpu_encoder()
                 && !cancel.load(Ordering::Relaxed)
             {
                 job.error = format!("硬件编码失败，已回退 CPU：{e}");
                 let _ = fs::remove_file(&partial);
-                let args = build_args(job, "libx264", &partial)?;
+                let args = build_args(job, job.preset.cpu_encoder(), &partial)?;
                 process(ffmpeg, &args, cancel, |us, s| {
                     job.progress = (us as f64 / total as f64).clamp(0.0, 0.99);
                     job.speed = format!("CPU 回退 · {s}");
@@ -292,7 +302,7 @@ pub fn export(
         if (actual - total).abs() > 150_000
             || v["width"].as_u64() != Some(job.preset.width as u64)
             || v["height"].as_u64() != Some(job.preset.height as u64)
-            || v["codec_name"] != "h264"
+            || v["codec_name"] != job.preset.codec
         {
             return Err(format!(
                 "输出基本验证失败：预期 {} 微秒，实际 {actual}",

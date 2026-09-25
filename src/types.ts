@@ -20,6 +20,7 @@ export type Session = {
   matches: Match[];
 };
 export type Preset = {
+  codec: "h264" | "hevc";
   width: number;
   height: number;
   bitrate_kbps: number;

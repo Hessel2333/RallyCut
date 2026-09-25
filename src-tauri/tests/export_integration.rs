@@ -8,7 +8,11 @@ fn tool(n: &str) -> String {
         &std::env::var("RALLYCUT_FFMPEG_DIR")
             .expect("Set RALLYCUT_FFMPEG_DIR to run ignored FFmpeg integration tests"),
     )
-    .join(format!("{n}.exe"))
+    .join(if cfg!(windows) {
+        format!("{n}.exe")
+    } else {
+        n.into()
+    })
     .to_string_lossy()
     .into()
 }
@@ -33,6 +37,74 @@ fn asset(path: &Path) -> Asset {
         duration_us: media::duration(&metadata).unwrap(),
         metadata,
         available: true,
+    }
+}
+#[test]
+#[ignore = "requires FFmpeg with libx265"]
+fn hevc_export_uses_matching_encoder_and_validates_hvc1() {
+    let d = tempfile::tempdir().unwrap();
+    let source = d.path().join("source.mp4");
+    ff(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=60:duration=2",
+        "-c:v",
+        "libx264",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-colorspace",
+        "bt709",
+        source.to_str().unwrap(),
+    ]);
+    let mut j = job(
+        vec![asset(&source)],
+        &d.path().join("hevc.mp4"),
+        0,
+        1_000_000,
+    );
+    j.preset.codec = "hevc".into();
+    j.preset.encoder = "auto".into();
+    assert!(engine::build_args(&j, "libx264", Path::new("wrong.mp4")).is_err());
+    let c = AtomicBool::new(false);
+    let hw = media::hardware(&tool("ffmpeg"));
+    engine::export(&mut j, &tool("ffmpeg"), &tool("ffprobe"), &hw, &c, |_| {}).unwrap();
+    let meta = media::probe(&tool("ffprobe"), Path::new(&j.output)).unwrap();
+    let v = media::video(&meta).unwrap();
+    assert_eq!(v["codec_name"], "hevc");
+    assert_eq!(v["codec_tag_string"], "hvc1");
+    assert!(!j.speed.contains("h264"));
+    j.id = id();
+    j.output = d.path().join("cpu.mp4").to_string_lossy().into();
+    // H.264 capabilities must not be selected for a HEVC job.
+    engine::export(
+        &mut j,
+        &tool("ffmpeg"),
+        &tool("ffprobe"),
+        &["h264_nvenc".into()],
+        &c,
+        |_| {},
+    )
+    .unwrap();
+    assert!(j.speed.contains("libx265"));
+    #[cfg(windows)]
+    {
+        j.id = id();
+        j.output = d.path().join("fallback.mp4").to_string_lossy().into();
+        engine::export(
+            &mut j,
+            &tool("ffmpeg"),
+            &tool("ffprobe"),
+            &["hevc_videotoolbox".into()],
+            &c,
+            |_| {},
+        )
+        .unwrap();
+        assert!(j.error.contains("回退 CPU"));
+        let meta = media::probe(&tool("ffprobe"), Path::new(&j.output)).unwrap();
+        assert_eq!(media::video(&meta).unwrap()["codec_name"], "hevc");
     }
 }
 fn job(assets: Vec<Asset>, output: &Path, start: i64, end: i64) -> Job {

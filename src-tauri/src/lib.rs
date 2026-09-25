@@ -102,15 +102,39 @@ fn snapshot(s: State<AppState>) -> Result<Snapshot> {
 }
 #[tauri::command]
 fn export_preferences(s: State<AppState>) -> Result<ExportPreferences> {
-    Ok(s.db
-        .lock()
-        .unwrap()
-        .get("export_preferences", "main")
-        .unwrap_or_default())
+    let db = s.db.lock().unwrap();
+    let old = db
+        .get::<serde_json::Value>("export_preferences", "main")
+        .ok();
+    let mut value: ExportPreferences = old
+        .clone()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(error)?
+        .unwrap_or_default();
+    if old
+        .as_ref()
+        .is_some_and(|v| v["current"].get("codec").is_none())
+    {
+        value.current.codec = "hevc".into();
+        value.current.encoder = "auto".into();
+    }
+    for built_in in ExportPreferences::default().presets {
+        if !value.presets.iter().any(|p| p.id == built_in.id) {
+            value.presets.push(built_in);
+        }
+    }
+    db.put("export_preferences", "main", &value)?;
+    Ok(value)
 }
 #[tauri::command]
 fn save_export_preferences(s: State<AppState>, value: ExportPreferences) -> Result<()> {
     for p in std::iter::once(&value.current).chain(value.presets.iter().map(|p| &p.preset)) {
+        if !["h264", "hevc"].contains(&p.codec.as_str())
+            || (p.encoder != "auto" && !p.accepts_encoder(&p.encoder))
+        {
+            return Err("视频编码与编码器不匹配".into());
+        }
         if p.width < 2
             || p.height < 2
             || p.width % 2 != 0
@@ -406,10 +430,13 @@ fn queue_action(s: State<AppState>, action: String, job_id: Option<String>) -> R
 fn open_output(s: State<AppState>) -> Result<()> {
     let p = settings(&s).output;
     std::fs::create_dir_all(&p).map_err(error)?;
-    media::command("explorer.exe")
-        .arg(p)
-        .spawn()
-        .map_err(error)?;
+    #[cfg(target_os = "windows")]
+    let opener = "explorer.exe";
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let opener = "xdg-open";
+    media::command(opener).arg(p).spawn().map_err(error)?;
     Ok(())
 }
 #[tauri::command]

@@ -1,4 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
+const releaseNotes = JSON.parse(readFileSync(new URL("../src/release-notes.json", import.meta.url), "utf8")) as { version: string; notes: string };
 
 async function setup(page: Page, options: { previous?: string; auto?: boolean; result?: string; blocked?: boolean } = {}) {
   await page.addInitScript((options) => {
@@ -17,7 +19,7 @@ async function setup(page: Page, options: { previous?: string; auto?: boolean; r
       transformCallback: () => 1, unregisterCallback: () => {},
       invoke: async (cmd: string, args: any) => {
         w.calls.push(cmd);
-        if (cmd === "plugin:app|version") return "0.2.0";
+        if (cmd === "plugin:app|version") return options.currentVersion;
         if (cmd === "snapshot") return { sessions: [], assets: [], jobs: options.blocked ? [{ id: "active", status: "exporting" }] : [], match_numbers: {}, paused: false, data_dir: "", settings: { ffmpeg: "", ffprobe: "", library: "", output: "" } };
         if (cmd === "tool_status") return { ffmpeg: { available: false }, ffprobe: { available: false } };
         if (cmd === "cached_previews") return [];
@@ -25,7 +27,7 @@ async function setup(page: Page, options: { previous?: string; auto?: boolean; r
         if (cmd === "plugin:updater|check") {
           if (w.updateResult === "error") throw new Error("offline");
           if (w.updateResult === "latest") return null;
-          return { rid: 2, currentVersion: "0.2.0", version: "0.3.0", body: "改进导出速度\n修复播放问题", rawJson: {} };
+          return { rid: 2, currentVersion: options.currentVersion, version: "99.0.0", body: "改进导出速度\n修复播放问题", rawJson: {} };
         }
         if (cmd === "plugin:updater|download") {
           args.onEvent.onmessage({ event: "Started", data: { contentLength: 100 } });
@@ -35,7 +37,7 @@ async function setup(page: Page, options: { previous?: string; auto?: boolean; r
         return 1;
       },
     };
-  }, options);
+  }, { ...options, currentVersion: releaseNotes.version });
   await page.goto("/");
 }
 
@@ -66,8 +68,8 @@ test("automatic download waits for confirmation and respects active work", async
 test("notes appear once after upgrade and support narrow screens", async ({ page }) => {
   await page.setViewportSize({ width: 600, height: 750 });
   await setup(page, { previous: "0.1.0" });
-  await expect(page.getByRole("heading", { name: "已更新至 0.2.0" })).toBeVisible();
-  await expect(page.locator(".release-notes")).toContainText("新增 Windows 安装包");
+  await expect(page.getByRole("heading", { name: `已更新至 ${releaseNotes.version}` })).toBeVisible();
+  await expect(page.locator(".release-notes")).toHaveText(releaseNotes.notes);
   if (process.env.RALLYCUT_QA_SCREENSHOT) await page.screenshot({ path: process.env.RALLYCUT_QA_SCREENSHOT });
   const box = await page.getByRole("dialog").boundingBox();
   expect(box!.x).toBeGreaterThanOrEqual(0);

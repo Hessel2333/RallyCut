@@ -41,6 +41,8 @@ pub struct Session {
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Preset {
+    #[serde(default = "legacy_codec")]
+    pub codec: String,
     pub width: u32,
     pub height: u32,
     pub bitrate_kbps: u32,
@@ -49,9 +51,61 @@ pub struct Preset {
     pub encoder: String,
     pub acknowledge_sdr: bool,
 }
+fn legacy_codec() -> String {
+    "h264".into()
+}
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+    #[test]
+    fn legacy_jobs_keep_h264_and_new_daily_default_is_hevc() {
+        let mut legacy = serde_json::to_value(Preset::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("codec");
+        let p: Preset = serde_json::from_value(legacy).unwrap();
+        assert_eq!(p.codec, "h264");
+        assert!(p.accepts_encoder("h264_videotoolbox"));
+        assert!(!p.accepts_encoder("hevc_nvenc"));
+        let p = ExportPreferences::default().current;
+        assert_eq!(p.codec, "hevc");
+        assert_eq!(p.cpu_encoder(), "libx265");
+        assert!(p.accepts_encoder("hevc_videotoolbox"));
+        assert!(!p.accepts_encoder("libx264"));
+    }
+}
+impl Preset {
+    pub fn cpu_encoder(&self) -> &str {
+        if self.codec == "hevc" {
+            "libx265"
+        } else {
+            "libx264"
+        }
+    }
+    pub fn accepts_encoder(&self, encoder: &str) -> bool {
+        match self.codec.as_str() {
+            "h264" => [
+                "libx264",
+                "h264_nvenc",
+                "h264_qsv",
+                "h264_amf",
+                "h264_videotoolbox",
+            ]
+            .contains(&encoder),
+            "hevc" => [
+                "libx265",
+                "hevc_nvenc",
+                "hevc_qsv",
+                "hevc_amf",
+                "hevc_videotoolbox",
+            ]
+            .contains(&encoder),
+            _ => false,
+        }
+    }
+}
 impl Default for Preset {
     fn default() -> Self {
         Self {
+            codec: legacy_codec(),
             width: 3840,
             height: 2160,
             bitrate_kbps: 20000,
@@ -109,11 +163,22 @@ pub struct ExportPreferences {
 impl Default for ExportPreferences {
     fn default() -> Self {
         Self {
-            current: Preset::default(),
+            current: Preset {
+                codec: "hevc".into(),
+                ..Preset::default()
+            },
             presets: vec![
                 NamedPreset {
+                    id: "bilibili-4k-hevc".into(),
+                    name: "日常 · 4K H.265".into(),
+                    preset: Preset {
+                        codec: "hevc".into(),
+                        ..Preset::default()
+                    },
+                },
+                NamedPreset {
                     id: "bilibili-4k".into(),
-                    name: "B站 · 4K".into(),
+                    name: "兼容 · 4K H.264".into(),
                     preset: Preset::default(),
                 },
                 NamedPreset {
