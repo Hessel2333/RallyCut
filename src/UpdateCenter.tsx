@@ -72,7 +72,7 @@ export function UpdateCenter({
       setMessage("");
       setPhase("checking");
       try {
-        if (update.current) await update.current.close();
+        if (update.current) await update.current.close().catch(() => {});
         update.current = null;
         setTarget(undefined);
         const candidate = await check({ timeout: 20000 });

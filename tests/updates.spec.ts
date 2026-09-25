@@ -89,3 +89,42 @@ test("network failure can retry and auto-update preference persists", async ({ p
   await page.getByRole("button", { name: "检查更新", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("当前已是最新版本");
 });
+
+
+test("failed installation releases the queue guard and permits a fresh download", async ({ page }) => {
+  await setup(page);
+  await page.evaluate(() => {
+    const w = window as any;
+    const invoke = w.__TAURI_INTERNALS__.invoke;
+    w.__TAURI_INTERNALS__.invoke = async (cmd: string, args: any) => {
+      if (cmd === "plugin:updater|install") throw new Error("installer unavailable");
+      if (cmd === "plugin:resources|close") throw new Error("resource already consumed");
+      return invoke(cmd, args);
+    };
+  });
+  await page.getByRole("button", { name: "版本与更新", exact: true }).click();
+  await page.getByRole("button", { name: "检查更新", exact: true }).click();
+  await page.getByRole("button", { name: "下载更新", exact: true }).click();
+  await page.getByRole("button", { name: "安装并重新打开" }).click();
+  await expect(page.getByRole("alert")).toContainText("未能安装更新");
+  expect(await page.evaluate(() => (window as any).calls.includes("end_app_update"))).toBe(true);
+  await page.getByRole("button", { name: "检查更新", exact: true }).click();
+  await expect(page.getByRole("button", { name: "下载更新", exact: true })).toBeVisible();
+});
+
+test("failed download never reaches installation", async ({ page }) => {
+  await setup(page);
+  await page.evaluate(() => {
+    const w = window as any;
+    const invoke = w.__TAURI_INTERNALS__.invoke;
+    w.__TAURI_INTERNALS__.invoke = async (cmd: string, args: any) => {
+      if (cmd === "plugin:updater|download") throw new Error("signature verification failed");
+      return invoke(cmd, args);
+    };
+  });
+  await page.getByRole("button", { name: "版本与更新", exact: true }).click();
+  await page.getByRole("button", { name: "检查更新", exact: true }).click();
+  await page.getByRole("button", { name: "下载更新", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("下载失败");
+  expect(await page.evaluate(() => (window as any).calls.includes("plugin:updater|install"))).toBe(false);
+});
