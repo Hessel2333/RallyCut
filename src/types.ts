@@ -44,10 +44,12 @@ export type Job = {
   validation: string;
 };
 export type Settings = {
+  theme?: string;
   ffmpeg: string;
   ffprobe: string;
   library: string;
   output: string;
+  folder_template?: string;
 };
 export type Snapshot = {
   match_numbers: Record<string, number>;

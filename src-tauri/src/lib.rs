@@ -185,10 +185,66 @@ async fn choose_path(app: tauri::AppHandle, kind: String) -> Result<Option<Strin
     .map_err(error)?
 }
 #[tauri::command]
+async fn choose_video_files(app: tauri::AppHandle) -> Result<Option<Vec<String>>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(files) = app
+            .dialog()
+            .file()
+            .add_filter(
+                "视频文件",
+                &["mp4", "mov", "mkv", "m4v", "avi", "mts", "m2ts"],
+            )
+            .blocking_pick_files()
+        else {
+            return Ok(None);
+        };
+        let mut paths = files
+            .into_iter()
+            .map(|file| {
+                file.into_path()
+                    .map_err(error)?
+                    .canonicalize()
+                    .map_err(error)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        paths.sort_by_key(|p| media::natural_key(&p.to_string_lossy()));
+        paths.dedup();
+        let result = paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        app.state::<AppState>()
+            .granted
+            .lock()
+            .unwrap()
+            .extend(paths);
+        Ok(Some(result))
+    })
+    .await
+    .map_err(error)?
+}
+#[tauri::command]
 async fn scan_directory(app: tauri::AppHandle, path: String) -> Result<Vec<String>> {
     tauri::async_runtime::spawn_blocking(move || {
         let s = app.state::<AppState>();
         media::scan(&allowed(&s, Path::new(&path))?)
+    })
+    .await
+    .map_err(error)?
+}
+#[tauri::command]
+async fn file_modified_ms(app: tauri::AppHandle, path: String) -> Result<u64> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = app.state::<AppState>();
+        let p = allowed(&s, Path::new(&path))?;
+        let modified = std::fs::metadata(p)
+            .map_err(error)?
+            .modified()
+            .map_err(error)?;
+        Ok(modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(error)?
+            .as_millis() as u64)
     })
     .await
     .map_err(error)?
@@ -217,6 +273,7 @@ async fn detect_hardware(app: tauri::AppHandle) -> Result<Vec<String>> {
 }
 #[tauri::command]
 fn save_settings(s: State<AppState>, value: Settings) -> Result<()> {
+    export_folder(&value.folder_template, "2026-09-23", "羽毛球")?;
     let old = settings(&s);
     for (new, previous) in [
         (&value.ffmpeg, &old.ffmpeg),
@@ -233,6 +290,23 @@ fn save_settings(s: State<AppState>, value: Settings) -> Result<()> {
         s.hardware.lock().unwrap().clear();
     }
     s.db.lock().unwrap().put("settings", "main", &value)
+}
+#[tauri::command]
+fn set_theme_preference(app: tauri::AppHandle, theme: String) -> Result<()> {
+    let native = match theme.as_str() {
+        "dark" => Some(tauri::Theme::Dark),
+        "light" => Some(tauri::Theme::Light),
+        "system" => None,
+        _ => return Err("不支持的主题".into()),
+    };
+    if let Some(window) = app.get_webview_window("main") {
+        window.set_theme(native).map_err(error)?;
+    }
+    let s = app.state::<AppState>();
+    let mut value = settings(&s);
+    value.theme = theme;
+    s.db.lock().unwrap().put("settings", "main", &value)?;
+    Ok(())
 }
 #[tauri::command]
 async fn import_session(
@@ -310,6 +384,12 @@ fn delete_session(s: State<AppState>, session_id: String) -> Result<()> {
     s.db.lock().unwrap().delete_session(&session_id)
 }
 #[tauri::command]
+fn remove_session_asset(s: State<AppState>, session_id: String, asset_id: String) -> Result<()> {
+    s.db.lock()
+        .unwrap()
+        .remove_session_asset(&session_id, &asset_id)
+}
+#[tauri::command]
 fn enqueue(
     s: State<AppState>,
     session_id: String,
@@ -362,7 +442,11 @@ fn enqueue(
                 format!("_{n}")
             };
             let p = Path::new(&cfg.output)
-                .join(safe_name(&session.date))
+                .join(export_folder(
+                    &cfg.folder_template,
+                    &session.date,
+                    &session.name,
+                )?)
                 .join(format!("{base}{suffix}.mp4"));
             if !p.exists() && !jobs.iter().any(|j| Path::new(&j.output) == p) {
                 break p.to_string_lossy().into_owned();
@@ -390,6 +474,10 @@ fn enqueue(
         jobs.push(job);
     }
     Ok(outputs)
+}
+#[tauri::command]
+fn delete_export_jobs(s: State<AppState>, job_ids: Vec<String>) -> Result<()> {
+    s.db.lock().unwrap().delete_jobs(&job_ids)
 }
 #[tauri::command]
 fn queue_action(s: State<AppState>, action: String, job_id: Option<String>) -> Result<()> {
@@ -519,6 +607,37 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                let app = window.app_handle().clone();
+                let paths = paths.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let mut files: Vec<_> = paths
+                        .into_iter()
+                        .filter_map(|p| p.canonicalize().ok())
+                        .filter(|p| {
+                            p.is_file()
+                                && p.extension().is_some_and(|e| {
+                                    ["mp4", "mov", "mkv", "m4v", "avi", "mts", "m2ts"]
+                                        .contains(&e.to_string_lossy().to_lowercase().as_str())
+                                })
+                        })
+                        .collect();
+                    files.sort_by_key(|p| media::natural_key(&p.to_string_lossy()));
+                    files.dedup();
+                    app.state::<AppState>()
+                        .granted
+                        .lock()
+                        .unwrap()
+                        .extend(files.clone());
+                    let files: Vec<String> = files
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect();
+                    let _ = app.emit("media-dropped", files);
+                });
+            }
+        })
         .setup(|app| {
             let data = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data)?;
@@ -558,6 +677,16 @@ pub fn run() {
                 hardware_tested: AtomicBool::new(false),
             });
             worker(app.handle().clone());
+            let preference = settings(&app.state::<AppState>()).theme;
+            set_theme_preference(
+                app.handle().clone(),
+                if preference.is_empty() {
+                    "dark".into()
+                } else {
+                    preference
+                },
+            )
+            .map_err(std::io::Error::other)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -567,18 +696,23 @@ pub fn run() {
             prepare_preview,
             cached_previews,
             choose_path,
+            choose_video_files,
             scan_directory,
             tool_status,
+            file_modified_ms,
             detect_hardware,
             save_settings,
+            set_theme_preference,
             import_session,
             save_session,
             delete_session,
+            remove_session_asset,
             relink_asset,
             enqueue,
             export_preferences,
             save_export_preferences,
             queue_action,
+            delete_export_jobs,
             open_output
         ])
         .build(tauri::generate_context!())

@@ -34,6 +34,22 @@ impl Store {
         self.conn.execute("INSERT INTO records(kind,id,json) VALUES(?1,?2,?3) ON CONFLICT(kind,id) DO UPDATE SET json=excluded.json",params![kind,id,serde_json::to_string(value).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
         Ok(())
     }
+    /// Delete terminal job records atomically; never touch media or output files.
+    pub fn delete_jobs(&self, ids: &[String]) -> Result<()> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        for id in ids {
+            let job: Job = self.get("job", id)?;
+            if !["completed", "failed", "cancelled", "interrupted"].contains(&job.status.as_str()) {
+                return Err("请先取消未完成的任务，再删除记录".into());
+            }
+            tx.execute("DELETE FROM records WHERE kind='job' AND id=?1", [id])
+                .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())
+    }
     /// Remove only this session. Assets, job snapshots and files remain intact.
     pub fn delete_session(&self, id: &str) -> Result<()> {
         let _: Session = self.get("session", id)?;
@@ -47,6 +63,24 @@ impl Store {
             .execute("DELETE FROM records WHERE kind='session' AND id=?1", [id])
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+    /// Remove a session reference and only segments that depend on it. Never delete files.
+    pub fn remove_session_asset(&self, session_id: &str, asset_id: &str) -> Result<()> {
+        let mut session: Session = self.get("session", session_id)?;
+        if !session.asset_ids.iter().any(|id| id == asset_id) {
+            return Err("素材不在当前拍摄中".into());
+        }
+        if self.list::<Job>("job")?.iter().any(|j| {
+            j.session_id == session_id
+                && !["completed", "failed", "cancelled", "interrupted"].contains(&j.status.as_str())
+        }) {
+            return Err("请先完成或取消此拍摄的导出任务".into());
+        }
+        session.asset_ids.retain(|id| id != asset_id);
+        session
+            .matches
+            .retain(|m| !m.ranges.iter().any(|r| r.asset_id == asset_id));
+        self.put("session", session_id, &session)
     }
     pub fn match_numbers(&self) -> Result<std::collections::HashMap<String, usize>> {
         let assets = self.list::<Asset>("asset")?;
@@ -129,6 +163,74 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn removing_asset_preserves_unrelated_segments_and_source_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Store::open(&dir.path().join("db")).unwrap();
+        let source = dir.path().join("source.mp4");
+        std::fs::write(&source, b"original").unwrap();
+        let asset = serde_json::json!({"id":"a","path":source,"original_path":source,"name":"a","size":8,"sha256":"hash","verification":"verified-copy","duration_us":100,"metadata":{},"available":true});
+        db.put("asset", "a", &asset).unwrap();
+        let session: Session = serde_json::from_value(serde_json::json!({"id":"s","name":"test","date":"2026-09-26","asset_ids":["a","b"],"matches":[{"id":"first","name":"1","note":"","ranges":[{"asset_id":"a","start_us":0,"end_us":100}]},{"id":"cross","name":"2","note":"","ranges":[{"asset_id":"a","start_us":50,"end_us":100},{"asset_id":"b","start_us":0,"end_us":50}]},{"id":"last","name":"3","note":"","ranges":[{"asset_id":"b","start_us":50,"end_us":100}]}]})).unwrap();
+        db.put("session", "s", &session).unwrap();
+        let mut other = session.clone();
+        other.id = "other".into();
+        db.put("session", "other", &other).unwrap();
+        let mut job = serde_json::json!({"id":"j","session_id":"s","segment":session.matches[0],"assets":[],"preset":Preset::default(),"output":"out.mp4","status":"exporting","progress":0,"speed":"","error":"","fingerprint":"x","validation":""});
+        db.put("job", "j", &job).unwrap();
+        assert!(db.remove_session_asset("s", "a").is_err());
+        job["status"] = "completed".into();
+        db.put("job", "j", &job).unwrap();
+        db.remove_session_asset("s", "a").unwrap();
+        let changed: Session = db.get("session", "s").unwrap();
+        assert_eq!(changed.asset_ids, vec!["b"]);
+        assert_eq!(changed.matches.len(), 1);
+        assert_eq!(changed.matches[0].id, "last");
+        assert_eq!(changed.matches[0].ranges[0].start_us, 50);
+        assert_eq!(std::fs::read(source).unwrap(), b"original");
+        assert!(db.get::<Asset>("asset", "a").is_ok());
+        assert_eq!(
+            db.get::<Session>("session", "other")
+                .unwrap()
+                .asset_ids
+                .len(),
+            2
+        );
+        assert!(db.get::<Job>("job", "j").is_ok());
+        assert!(db.remove_session_asset("s", "a").is_err());
+    }
+    #[test]
+    fn deleting_jobs_is_atomic_persistent_and_preserves_outputs() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("queue.db");
+        let s = Store::open(&path).unwrap();
+        let output = d.path().join("比赛.mp4");
+        std::fs::write(&output, b"keep output").unwrap();
+        let mut job = serde_json::json!({"id":"done","session_id":"s","segment":{"id":"m","name":"m","ranges":[],"note":""},"assets":[],"preset":Preset::default(),"output":output,"status":"completed","progress":1,"speed":"","error":"","fingerprint":"hash","validation":""});
+        s.put("job", "done", &job).unwrap();
+        for status in ["waiting", "preparing", "exporting", "validating", "unknown"] {
+            job["id"] = "active".into();
+            job["status"] = status.into();
+            s.put("job", "active", &job).unwrap();
+            assert!(s.delete_jobs(&["done".into(), "active".into()]).is_err());
+            assert!(s.get::<Job>("job", "done").is_ok());
+        }
+        assert!(s.delete_jobs(&["done".into(), "missing".into()]).is_err());
+        assert!(s.get::<Job>("job", "done").is_ok());
+        for status in ["completed", "failed", "cancelled", "interrupted"] {
+            job["id"] = status.into();
+            job["status"] = status.into();
+            s.put("job", status, &job).unwrap();
+            s.delete_jobs(&[status.into()]).unwrap();
+            assert!(s.get::<Job>("job", status).is_err());
+        }
+        s.delete_jobs(&["done".into()]).unwrap();
+        drop(s);
+        let reopened = Store::open(&path).unwrap();
+        assert!(reopened.get::<Job>("job", "done").is_err());
+        assert!(reopened.get::<Job>("job", "active").is_ok());
+        assert_eq!(std::fs::read(output).unwrap(), b"keep output");
+    }
     #[test]
     fn deleting_session_preserves_files_shared_assets_and_history() {
         let d = tempfile::tempdir().unwrap();

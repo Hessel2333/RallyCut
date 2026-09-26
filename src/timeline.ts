@@ -116,3 +116,16 @@ export function parseTime(s: string) {
   if (+m >= 60 || +sec >= 60) throw Error("分和秒必须小于 60");
   return (+h * 3600 + +m * 60 + +sec) * 1000000 + +frac.padEnd(6, "0");
 }
+
+export function timelineGaps(assets: Asset[], matches: Match[]) {
+  const gaps: { start: number; end: number }[] = [];
+  let cursor = 0;
+  for (const m of orderedMatches(assets, matches)) {
+    const b = bounds(assets, m.ranges);
+    if (b.start > cursor) gaps.push({ start: cursor, end: b.start });
+    cursor = Math.max(cursor, b.end);
+  }
+  if (cursor < totalUs(assets))
+    gaps.push({ start: cursor, end: totalUs(assets) });
+  return gaps;
+}

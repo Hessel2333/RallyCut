@@ -1,3 +1,4 @@
+import { outsideDialog } from "./EditorControls";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
@@ -175,6 +176,9 @@ export function UpdateCenter({
       </button>
       <dialog
         ref={dialog}
+        onClick={(e) => {
+          if (outsideDialog(e)) dismiss();
+        }}
         className="update-dialog"
         aria-labelledby="update-title"
         onCancel={(event) => {

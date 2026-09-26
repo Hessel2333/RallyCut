@@ -133,10 +133,63 @@ pub struct Job {
 }
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 pub struct Settings {
+    #[serde(default = "default_theme")]
+    pub theme: String,
     pub ffmpeg: String,
     pub ffprobe: String,
     pub library: String,
     pub output: String,
+    #[serde(default = "default_folder_template")]
+    pub folder_template: String,
+}
+pub fn default_theme() -> String {
+    "dark".into()
+}
+pub fn default_folder_template() -> String {
+    "{date}-日常羽毛球".into()
+}
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+    #[test]
+    fn folder_templates_are_safe_and_compatible() {
+        assert_eq!(
+            export_folder("", "2026-09-23", "羽毛球").unwrap(),
+            "2026.09.23-日常羽毛球"
+        );
+        assert_eq!(
+            export_folder("{date}-{name}", "2026-09-23", "男双/练习").unwrap(),
+            "2026.09.23-男双_练习"
+        );
+        assert!(export_folder("../{date}", "x", "y").is_err());
+        assert!(export_folder("{unknown}", "x", "y").is_err());
+        let old: Settings = serde_json::from_value(
+            serde_json::json!({"ffmpeg":"","ffprobe":"","library":"","output":""}),
+        )
+        .unwrap();
+        assert_eq!(old.folder_template, default_folder_template());
+    }
+}
+pub fn export_folder(template: &str, date: &str, name: &str) -> Result<String> {
+    let template = if template.is_empty() {
+        default_folder_template()
+    } else {
+        template.into()
+    };
+    if template.len() > 240
+        || template.contains(['/', '\\'])
+        || template
+            .replace("{date}", "")
+            .replace("{name}", "")
+            .contains(['{', '}'])
+    {
+        return Err("命名规则仅支持 {date}、{name}，不能包含路径分隔符".into());
+    }
+    Ok(safe_name(
+        &template
+            .replace("{date}", &date.replace('-', "."))
+            .replace("{name}", name),
+    ))
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {

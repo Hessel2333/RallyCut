@@ -8,6 +8,7 @@ import {
   appendSegment,
   splitSegment,
   orderedMatches,
+  timelineGaps,
 } from "./timeline";
 import type { Asset } from "./types";
 const assets = [0, 1, 2].map(
@@ -100,4 +101,54 @@ describe("integer half-open timeline", () => {
     expect(bounds(assets, r)).toEqual({ start: 12000000, end: 18000000 });
     expect(r[0].asset_id).toBe("0");
   });
+});
+
+it("recovers a deleted middle segment exactly without overlapping neighbours", () => {
+  let matches = appendSegment(assets, [], 0, 12000000, "first", "a").matches;
+  matches = appendSegment(
+    assets,
+    matches,
+    12000000,
+    18000000,
+    "middle",
+    "b",
+  ).matches;
+  matches = appendSegment(
+    assets,
+    matches,
+    18000000,
+    45000000,
+    "last",
+    "c",
+  ).matches;
+  const remaining = matches.filter((m) => m.id !== "b");
+  expect(timelineGaps(assets, remaining)).toEqual([
+    { start: 12000000, end: 18000000 },
+  ]);
+  const restored = appendSegment(
+    assets,
+    remaining,
+    12000000,
+    18000000,
+    "middle",
+    "new",
+  );
+  expect(restored.matches.map((m) => bounds(assets, m.ranges))).toEqual(
+    matches.map((m) => bounds(assets, m.ranges)),
+  );
+  expect(timelineGaps(assets, restored.matches)).toEqual([]);
+});
+it("gaps include leading and trailing time and merge overlapping coverage", () => {
+  expect(timelineGaps(assets, [])).toEqual([{ start: 0, end: 45000000 }]);
+  const a = {
+    id: "a",
+    name: "a",
+    note: "",
+    ranges: mapRange(assets, 12000000, 18000000),
+  };
+  const b = { ...a, id: "b", ranges: mapRange(assets, 15000000, 20000000) };
+  expect(timelineGaps(assets, [b, a])).toEqual([
+    { start: 0, end: 12000000 },
+    { start: 20000000, end: 45000000 },
+  ]);
 });
