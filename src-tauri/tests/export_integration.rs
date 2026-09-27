@@ -118,6 +118,18 @@ fn relocated_retry_and_post_commit_recovery_preserve_content() {
     assert!(artifacts::recover(&recovered, &cancel).is_err());
 }
 fn ff(args: &[&str]) {
+    // Declare color on generated frames as well as the encoder output. Newer
+    // FFmpeg versions propagate frame color properties over output options.
+    let args: Vec<String> = args
+        .iter()
+        .map(|arg| {
+            if arg.starts_with("testsrc2=") {
+                format!("{arg},setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709")
+            } else {
+                (*arg).to_string()
+            }
+        })
+        .collect();
     let o = media::command(&tool("ffmpeg"))
         .args(["-hide_banner", "-v", "error", "-y"])
         .args(args)
@@ -127,6 +139,15 @@ fn ff(args: &[&str]) {
 }
 fn asset(path: &Path) -> Asset {
     let metadata = media::probe(&tool("ffprobe"), path).unwrap();
+    let stream = media::video(&metadata).unwrap();
+    assert_eq!(
+        stream["color_transfer"], "bt709",
+        "synthetic fixture transfer"
+    );
+    assert_eq!(
+        stream["color_primaries"], "bt709",
+        "synthetic fixture primaries"
+    );
     Asset {
         id: id(),
         path: path.to_string_lossy().into(),

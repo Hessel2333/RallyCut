@@ -590,7 +590,8 @@ button.danger:hover {
   font-size: 11px;
 }
 .transport {
-  height: 62px;
+  min-height: 62px;
+  height: auto;
   display: flex;
   align-items: center;
   padding: 10px 18px;
@@ -610,9 +611,9 @@ button.danger:hover {
   display: flex;
   align-items: center;
   gap: 10px;
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
+  position: static;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 .play-controls button {
   background: transparent;

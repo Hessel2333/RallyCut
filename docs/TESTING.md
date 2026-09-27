@@ -137,3 +137,5 @@ cargo test --manifest-path src-tauri/Cargo.toml -- --include-ignored --nocapture
 2026-09-27 应用关闭后重新运行发布门禁：npm test 19/19；npm run test:e2e 24/24；更新清单脚本测试 2/2；npm run build、版本一致性与 cargo fmt --check 通过。npm 官方 registry 的生产依赖审计为 0 项漏洞（本机默认镜像不支持审计，已改用官方审计端点）。保留原有 design/ 未提交内容，未纳入发行。
 
 应用关闭后的 cargo test --locked 全套通过：30 个库测试与 1 个可靠性集成测试通过，1 个原生凭据测试保持条件忽略；随后显式运行 5 个 FFmpeg 集成测试，全部通过。
+
+首次云端检查发现 macOS 播放控制遮挡与新版 FFmpeg 合成帧色彩元数据覆盖输出参数的问题。取消未公开的 v0.5.0 发布，v0.5.1 改用正常流布局，并在合成源帧上显式 setparams；新增源帧 BT.709 断言，未放宽生产色彩校验。
