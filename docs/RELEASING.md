@@ -26,3 +26,6 @@ npx tauri build --bundles nsis -- --locked
 产物位于 `src-tauri/target/release/bundle/nsis/`。FFmpeg 与 ffprobe 暂不内置，需要在设置中指定可执行文件或通过 PATH 提供。
 
 自动更新通过 HTTPS 请求 GitHub Releases，网络不可用时保留当前版本并允许重试；关闭自动更新后只通过手动检查触发新的检查。正在进行的下载不会强行中断。更新说明按普通文本显示，不执行远程 HTML。
+
+
+发布后需匿名读取 `releases/latest/download/latest.json`，确认版本、稳定 tag 下载地址及签名。GitHub 草稿的 `browser_download_url` 可能临时指向 `untagged-*`；finalize-update 会按版本和已知 Release 资产生成稳定地址，不能直接沿用临时地址。替换清单后应复查默认更新入口，避免将 CDN 的旧缓存视为最新文件。

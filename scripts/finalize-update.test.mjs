@@ -16,3 +16,15 @@ test("rejects unknown assets and a different repository", () => {
   assert.throws(() => directDownloadManifest(manifest, [], repo));
   assert.throws(() => directDownloadManifest(manifest, [asset], "someone/else"));
 });
+
+
+test("draft temporary URLs become stable tag URLs before and after publication", () => {
+  const temporary = { ...asset, browser_download_url: `https://github.com/${repo}/releases/download/untagged-123/setup.exe` };
+  const draft = structuredClone(manifest);
+  draft.platforms["windows-x86_64"].url = temporary.browser_download_url;
+  const result = directDownloadManifest(draft, [temporary], repo);
+  assert.equal(result.platforms["windows-x86_64"].url, asset.browser_download_url);
+  assert.equal(result.platforms["windows-x86_64"].signature, "signed-payload");
+  assert.deepEqual(directDownloadManifest(draft, [asset], repo), result);
+  assert.deepEqual(directDownloadManifest(result, [temporary], repo), result);
+});

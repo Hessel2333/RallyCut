@@ -6,12 +6,27 @@ import { pathToFileURL } from "node:url";
 
 export function directDownloadManifest(manifest, assets, repository) {
   const result = structuredClone(manifest);
+  const prefix = `https://github.com/${repository}/releases/download/`;
+  const tag = `v${manifest.version.replace(/^v/, "")}`;
+  const canonical = (asset) => {
+    if (!asset.browser_download_url.startsWith(prefix)) return null;
+    const name = asset.name ?? decodeURIComponent(new URL(asset.browser_download_url).pathname.split("/").at(-1));
+    return `${prefix}${encodeURIComponent(tag)}/${encodeURIComponent(name)}`;
+  };
+  const normalizeDraft = (url) => {
+    if (!url.startsWith(prefix)) return url;
+    const parts = url.slice(prefix.length).split("/");
+    return parts.length === 2 && parts[0].startsWith("untagged-")
+      ? `${prefix}${encodeURIComponent(tag)}/${parts[1]}` : url;
+  };
   for (const platform of Object.values(result.platforms)) {
-    const asset = assets.find(a => a.url === platform.url || a.browser_download_url === platform.url);
-    if (!asset || !asset.browser_download_url.startsWith(`https://github.com/${repository}/releases/download/`)) {
+    const asset = assets.find(a => a.url === platform.url || a.browser_download_url === platform.url || canonical(a) === normalizeDraft(platform.url));
+    if (!asset || !canonical(asset)) {
       throw new Error("Update artifact is not a release asset in this repository");
     }
-    platform.url = asset.browser_download_url;
+    // Draft browser_download_url can contain an ephemeral untagged-* ref.
+    // Publish the stable version URL, retaining the asset's exact signature.
+    platform.url = canonical(asset);
   }
   return result;
 }

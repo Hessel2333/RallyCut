@@ -139,3 +139,15 @@ cargo test --manifest-path src-tauri/Cargo.toml -- --include-ignored --nocapture
 应用关闭后的 cargo test --locked 全套通过：30 个库测试与 1 个可靠性集成测试通过，1 个原生凭据测试保持条件忽略；随后显式运行 5 个 FFmpeg 集成测试，全部通过。
 
 首次云端检查发现 macOS 播放控制遮挡与新版 FFmpeg 合成帧色彩元数据覆盖输出参数的问题。取消未公开的 v0.5.0 发布，v0.5.1 改用正常流布局，并在合成源帧上显式 setparams；新增源帧 BT.709 断言，未放宽生产色彩校验。
+
+
+## v0.5.1 发布与本机升级验收
+
+- 发布提交：6aba509d50eac9bdcfc3d6251990bd1bb6d8a2fb。主线 Checks（36327995298）的 Windows、macOS 与独立 FFmpeg 作业全部通过。
+- Release Windows app（36328293525）第一次出现队列页面入口超时；未修改断言、未 skip，重跑失败作业后全部通过，已公开正式 v0.5.1。v0.5.0 发布已取消，未公开安装包。
+- 本机 NSIS 当前用户升级退出码 0，注册版本与实际启动更新说明均为 0.5.1。安装前已备份 SQLite 并检查 integrity_check=ok，升级后 3 条拍摄记录、16 个素材、2 个成片、1 个草稿仍在。
+- 已核对安装后的程序与本机 Release 构建内容一致（仅安装器预期的 NSS/UNK bundle marker 不同），并验证本机安装包的更新签名。
+- 用户按 Escape 停止原生界面操作后，没有继续操作窗口；本次原生验收仅覆盖安装、启动、版本说明与记录保留，不代表封面/投稿完整原生端到端验收。
+- 发布后实际下载发现 latest.json 引用 GitHub 草稿的 untagged-* 临时地址。先新增失败测试，修复 finalize-update 为稳定版本 URL，保留签名；3 项脚本测试通过，线上清单已修正。
+- 匿名访问默认 releases/latest/download/latest.json 得到 0.5.1 和稳定 v0.5.1 安装包地址；实际下载线上安装包 5,115,282 字节，用应用内置公钥验证内容签名和受信注释均通过。SHA-256：b21c407a06044de28609560a7c085b00faa4823c36ffc868de9676332d795101。
+- 无任何 B 站上传、重传或投稿操作。重启后尚未提交的远端上传结果按既有规则转为待核对。
