@@ -1,5 +1,5 @@
 use crate::model::*;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use std::path::Path;
 
@@ -7,6 +7,57 @@ pub struct Store {
     conn: Connection,
 }
 impl Store {
+    pub fn finish_job(
+        &self,
+        job: &Job,
+        artifact: Option<&crate::artifacts::ExportArtifact>,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        if job.status == "completed" && artifact.is_none() {
+            return Err("完成任务缺少已验证成片".into());
+        }
+        if let Some(a) = artifact {
+            self.put("artifact", &a.id, a)?;
+            self.put("artifact_job", &job.id, &a.id)?;
+        }
+        self.put("job", &job.id, job)?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+    pub fn artifact_for_job(&self, job_id: &str) -> Result<Option<String>> {
+        let value: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT json FROM records WHERE kind='artifact_job' AND id=?1",
+                [job_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        value
+            .map(|v| serde_json::from_str(&v).map_err(|e| e.to_string()))
+            .transpose()
+    }
+    pub fn claim_next(&self) -> Result<Option<Job>> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        let next = self
+            .list::<Job>("job")?
+            .into_iter()
+            .find(|j| j.status == "waiting");
+        if let Some(mut job) = next {
+            job.status = "preparing".into();
+            self.put("job", &job.id, &job)?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(Some(job))
+        } else {
+            Ok(None)
+        }
+    }
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
         let version: i64 = conn
@@ -28,6 +79,7 @@ impl Store {
                 s.put("job", &j.id, &j)?;
             }
         }
+        crate::publication::recover_records(&s)?;
         Ok(s)
     }
     pub fn put<T: Serialize>(&self, kind: &str, id: &str, value: &T) -> Result<()> {
@@ -163,6 +215,53 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn final_state_and_artifact_are_atomic_under_write_failure() {
+        let d = tempfile::tempdir().unwrap();
+        let db = Store::open(&d.path().join("db")).unwrap();
+        let mut job: Job = serde_json::from_value(serde_json::json!({"id":"j","session_id":"s","segment":{"id":"m","name":"m","ranges":[],"note":""},"assets":[],"preset":Preset::default(),"output":"out.mp4","status":"validating","progress":1,"speed":"","error":"","fingerprint":"source","validation":"verified"})).unwrap();
+        db.put("job", "j", &job).unwrap();
+        let artifact: crate::artifacts::ExportArtifact = serde_json::from_value(serde_json::json!({"id":"reused-artifact","session_id":"s","match_id":"m","content_fingerprint":"source","segment":null,"preset":null,"path":"out.mp4","size":1,"duration_us":1,"codec":"h264","validation":"verified","file_sha256":"file","created_ms":0,"availability":"available"})).unwrap();
+        db.conn.execute_batch("CREATE TRIGGER fail_final BEFORE UPDATE ON records WHEN NEW.kind='job' BEGIN SELECT RAISE(FAIL, 'injected final failure'); END;").unwrap();
+        job.status = "completed".into();
+        assert!(db.finish_job(&job, Some(&artifact)).is_err());
+        assert!(db
+            .list::<crate::artifacts::ExportArtifact>("artifact")
+            .unwrap()
+            .is_empty());
+        assert_eq!(db.get::<Job>("job", "j").unwrap().status, "validating");
+        db.conn.execute_batch("DROP TRIGGER fail_final;").unwrap();
+        db.finish_job(&job, Some(&artifact)).unwrap();
+        db.delete_jobs(&["j".into()]).unwrap();
+        assert_eq!(db.get::<String>("artifact_job", "j").unwrap(), artifact.id);
+        assert_eq!(
+            db.get::<crate::artifacts::ExportArtifact>("artifact", "reused-artifact")
+                .unwrap()
+                .file_sha256,
+            "file"
+        );
+    }
+    #[test]
+    fn claim_must_report_corruption_and_failed_state_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Store::open(&dir.path().join("fault.sqlite3")).unwrap();
+        db.conn
+            .execute("INSERT INTO records VALUES('job','bad','not json')", [])
+            .unwrap();
+        assert!(
+            db.claim_next().is_err(),
+            "corrupt queue must not appear empty"
+        );
+        db.conn.execute("DELETE FROM records", []).unwrap();
+        let job = serde_json::json!({"id":"j","session_id":"s","segment":{"id":"m","name":"m","ranges":[],"note":""},"assets":[],"preset":Preset::default(),"output":"out.mp4","status":"waiting","progress":0,"speed":"","error":"","fingerprint":"x","validation":""});
+        db.put("job", "j", &job).unwrap();
+        db.conn.execute_batch("CREATE TRIGGER fail_claim BEFORE UPDATE ON records BEGIN SELECT RAISE(FAIL, 'injected disk failure'); END;").unwrap();
+        assert!(
+            db.claim_next().is_err(),
+            "must not run an uncommitted claim"
+        );
+        assert_eq!(db.get::<Job>("job", "j").unwrap().status, "waiting");
+    }
     #[test]
     fn removing_asset_preserves_unrelated_segments_and_source_files() {
         let dir = tempfile::tempdir().unwrap();

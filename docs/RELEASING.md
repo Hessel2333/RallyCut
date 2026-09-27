@@ -20,7 +20,7 @@ Tauri 更新签名用于验证下载包，不等于 Windows Authenticode 代码�
 
 ```powershell
 $env:TAURI_SIGNING_PRIVATE_KEY = 'C:\Users\你的用户名\.tauri\RallyCut.key'
-npm run tauri build -- --bundles nsis -- --locked
+npx tauri build --bundles nsis -- --locked
 ```
 
 产物位于 `src-tauri/target/release/bundle/nsis/`。FFmpeg 与 ffprobe 暂不内置，需要在设置中指定可执行文件或通过 PATH 提供。

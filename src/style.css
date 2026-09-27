@@ -1941,3 +1941,48 @@ select option {
   font-size: 11px;
   color: var(--muted);
 }
+
+.publication-panel { width: min(1040px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); overflow: auto; }
+.publication-account, .publication-qr, .publication-cover { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.publication-account { padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+.publication-account > span { margin-right: auto; }
+.publication-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 24px; margin-top: 20px; }
+.publication-library { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.publication-library button { text-align: left; white-space: normal; }
+.publication-library small, .publication-part small, .artifact-row small { display: block; color: var(--muted); font-size: 11px; margin-top: 5px; }
+.publication-library h3 { margin: 16px 0 4px; font-size: 13px; }
+.publication-editor { min-width: 0; }
+.publication-editor fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.publication-editor fieldset > label { display: flex; flex-direction: column; gap: 6px; margin: 14px 0; }
+.publication-editor input, .publication-editor textarea, .publication-editor select { width: 100%; min-width: 0; }
+.publication-editor textarea { min-height: 72px; resize: vertical; }
+.publication-cover label { display: flex; flex-direction: column; gap: 6px; max-width: 160px; }
+.publication-part { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
+.publication-part > label { flex: 1; min-width: 0; }
+.publication-part progress { width: 100%; height: 5px; }
+.publication-part > span { width: 28px; color: var(--muted); }
+.publication-editor .modal-actions { flex-wrap: wrap; justify-content: flex-start; }
+.artifact-row { display: flex; gap: 5px; align-items: center; padding: 6px 0; }
+.artifact-row > label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.artifact-row input { margin-right: 6px; }
+@media (max-width: 740px) {
+  .publication-layout { grid-template-columns: 1fr; }
+  .publication-panel { padding: 16px; max-height: calc(100dvh - 16px); }
+  .publication-library { max-height: 220px; overflow: auto; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+}
+
+.publication-editor textarea { color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 7px 9px; }
+.publication-resolution { display: grid; gap: 10px; margin-top: 18px; }
+.publication-resolution input[type="checkbox"] { width: 14px; margin-right: 6px; }
+
+.publication-upload-progress { display: grid; gap: 6px; margin-top: 6px; color: var(--tone-e4e6ea); font-variant-numeric: tabular-nums; font-size: 12px; }
+.publication-upload-progress span { color: var(--tone-e4e6ea); }
+
+.cover-picker { margin: 16px 0 24px; }
+.cover-selected img { display: block; width: min(100%, 480px); max-height: 270px; object-fit: contain; border-radius: 6px; }
+.cover-candidates { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; max-height: 330px; overflow: auto; }
+.cover-candidates button { display: flex; flex-direction: column; gap: 8px; padding: 8px; height: auto; white-space: normal; text-align: left; }
+.cover-candidates button[aria-pressed="true"] { outline: 2px solid var(--accent, #719bdd); outline-offset: -2px; }
+.cover-candidates img { width: 100%; aspect-ratio: 16 / 9; object-fit: contain; border-radius: 4px; }
+.cover-candidates span { max-width: 100%; overflow-wrap: anywhere; }
+.transport { flex-wrap: wrap; }

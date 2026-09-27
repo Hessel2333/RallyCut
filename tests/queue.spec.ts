@@ -583,3 +583,19 @@ test("date click opens picker while manual entry remains available", async ({
   await page.mouse.click(2, 2);
   await expect(page.locator(".modal-backdrop")).toHaveCount(0);
 });
+
+test("native drop must protect unsaved export settings", async ({ page }) => {
+  await setup(page);
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "导出设置", exact: true }).click();
+  await page.getByText("文件夹命名规则", { exact: true }).click();
+  await page.getByLabel("文件夹名称").fill("{date}-保留编辑");
+  await page.evaluate(() => (window as any).dropHandler({ payload: ["C:/fixture.mp4"] }));
+  const prompt = page.getByRole("dialog", { name: "保存更改？" });
+  await expect(prompt).toBeVisible();
+  await prompt.getByRole("button", { name: "继续编辑" }).click();
+  await expect(page.getByLabel("文件夹名称")).toHaveValue("{date}-保留编辑");
+  await page.evaluate(() => (window as any).dropHandler({ payload: ["C:/fixture.mp4"] }));
+  await prompt.getByRole("button", { name: "不保存" }).click();
+  await expect(page.getByText("已拖入 1 个视频", { exact: true })).toBeVisible();
+});

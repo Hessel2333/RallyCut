@@ -33,6 +33,7 @@ import type {
   Tools,
   Asset,
   ExportPreferences,
+  Job,
 } from "./types";
 import {
   mapRange,
@@ -59,6 +60,9 @@ import {
   defaultTags,
   readPreference,
 } from "./editorPreferences";
+import { useMediaSeek } from "./mediaSeek";
+import { SessionSaves } from "./sessionSaves";
+import { PublicationPanel } from "./PublicationPanel";
 import { UpdateCenter } from "./UpdateCenter";
 
 const defaultPreset: Preset = {
@@ -178,22 +182,40 @@ export default function App() {
   } | null>(null);
   const [outputPreview, setOutputPreview] = useState<string[]>([]);
   const [data, setData] = useState<Snapshot>();
+  const queueSequence = useRef(0);
+  const knownJobs = useRef(new Set<string>());
+  const jobPatches = useRef(new Map<string, { sequence: number; job: Partial<Job> }>());
   const [sessionId, setSessionId] = useState(
     () => localStorage.getItem("rallycut-session") ?? "",
   );
   const [tools, setTools] = useState<Tools>();
   const [error, setError] = useState("");
-  const [saved, setSaved] = useState("已保存");
+  const [, redrawSave] = useState(0);
+  const [saves] = useState(() => new SessionSaves(
+    value => invoke("save_session", { session: value }),
+    () => redrawSave(n => n + 1),
+  ));
+  const saved = saves.status(sessionId);
   const [closePrompt, setClosePrompt] = useState<
     "settings" | "export" | "tags" | null
   >(null);
   const [closing, setClosing] = useState(false);
   const [closeError, setCloseError] = useState("");
+  const [exitError, setExitError] = useState<string | null>(null);
+  const exiting = useRef(false);
+  const exitRef = useRef<() => void>(() => {});
+  const deferredTransition = useRef<(() => void) | null>(null);
+  const transitionRef = useRef<(action: () => void) => void>(() => {});
   const [modal, setModal] = useState<"import" | "settings" | "export" | null>(
     null,
   );
   const [left, setLeft] = useState(true);
   const [queue, setQueue] = useState(false);
+  const [coverBusy, setCoverBusy] = useState(false);
+  const [coverNotice, setCoverNotice] = useState("");
+  const [publicationOpen, setPublicationOpen] = useState(false);
+  const [publicationActive, setPublicationActive] = useState(false);
+  const publicationGuard = useRef<(action: () => void) => void>(action => action());
   const [allJobs, setAllJobs] = useState(false);
   const queueDialog = useRef<HTMLDialogElement>(null);
   const [queueError, setQueueError] = useState("");
@@ -231,7 +253,6 @@ export default function App() {
   const [playhead, setPlayhead] = useState(0);
   const [sourceIndex, setSourceIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
-  const [switchingSource, setSwitchingSource] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [dragPreview, setDragPreview] = useState<{
     id: string;
@@ -281,12 +302,14 @@ export default function App() {
         setError("请拖入视频文件");
         return;
       }
-      setQueue(false);
-      setModal("import");
-      setError("");
-      setManualDate(false);
-      setPaths(e.payload);
-      setImportDir(`已拖入 ${e.payload.length} 个视频`);
+      transitionRef.current(() => {
+        setQueue(false);
+        setModal("import");
+        setError("");
+        setManualDate(false);
+        setPaths(e.payload);
+        setImportDir(`已拖入 ${e.payload.length} 个视频`);
+      });
     });
     return () => {
       void off.then((f) => f());
@@ -315,9 +338,6 @@ export default function App() {
     return () => media.removeEventListener("change", apply);
   }, [appearance]);
   const video = useRef<HTMLVideoElement>(null);
-  const pending = useRef<{ local: number; play: boolean } | null>(null);
-  const saveChain = useRef(Promise.resolve());
-  const saveError = useRef("");
   const undo = useRef<Match[][]>([]);
   const redo = useRef<Match[][]>([]);
   const session = data?.sessions.find((s) => s.id === sessionId);
@@ -329,8 +349,21 @@ export default function App() {
   const offset = assets
     .slice(0, sourceIndex)
     .reduce((n, a) => n + a.duration_us, 0);
+  const mediaPath = (asset: Asset) => previews.find(p => p.asset_id === asset.id && p.kind === "proxy")?.path ?? asset.path;
+  const { pending, switchingSource, seekError, beginSeek, validMedia, failSeek, finishSeek } = useMediaSeek(video, sessionId, current, mediaPath, setPlaying, setError);
   const refresh = async (full = true) => {
+    const checkpoint = saves.checkpoint();
+    const startedAt = queueSequence.current;
     const v = await invoke<Snapshot>("snapshot");
+    v.sessions = saves.merge(v.sessions, checkpoint);
+    v.jobs = v.jobs.map(j => {
+      const patch = jobPatches.current.get(j.id);
+      return patch && patch.sequence > (v.queue_sequence ?? startedAt) ? { ...j, ...patch.job } : j;
+    });
+    knownJobs.current = new Set(v.jobs.map(j => j.id));
+    for (const [id, patch] of jobPatches.current) if (patch.sequence <= (v.queue_sequence ?? startedAt)) jobPatches.current.delete(id);
+    queueSequence.current = Math.max(queueSequence.current, v.queue_sequence ?? 0);
+    if (v.queue_error) setQueueError(v.queue_error);
     setData((old) =>
       full || !old
         ? v
@@ -347,6 +380,23 @@ export default function App() {
         v.sessions.some((s) => s.id === id) ? id : v.sessions[0]?.id || "",
       );
   };
+  const flushAndExit = async (discard = false) => {
+    if (exiting.current) return;
+    exiting.current = true;
+    try {
+      if (!discard) await saves.flush(true);
+      await invoke("authorize_exit");
+    } catch (e) { setExitError(String(e)); }
+    finally { exiting.current = false; }
+  };
+  exitRef.current = () => {
+    if (busy) void flushAndExit();
+    else transitionRef.current(() => void flushAndExit());
+  };
+  useEffect(() => {
+    const off = listen("exit-requested", () => exitRef.current());
+    return () => { void off.then(f => f()); };
+  }, []);
   const run = async (fn: () => Promise<unknown>) => {
     try {
       setError("");
@@ -372,10 +422,19 @@ export default function App() {
         setPresetName(activePreset.name);
       }
     });
-    const timer = setInterval(
-      () => void refresh(false).catch((e) => setError(String(e))),
-      1000,
-    );
+    let active = true;
+    const jobsOff = listen<{ sequence: number; job: Pick<Job, "id" | "status" | "progress" | "speed" | "error" | "validation" | "output"> }>("job-update", e => {
+      if (!active || e.payload.sequence <= queueSequence.current) return;
+      const gap = e.payload.sequence > queueSequence.current + 1;
+      queueSequence.current = e.payload.sequence;
+      const job = e.payload.job;
+      jobPatches.current.set(job.id, e.payload);
+      setData(d => d ? { ...d, jobs: d.jobs.map(j => j.id === job.id ? { ...j, ...job } : j) } : d);
+      if (gap || !knownJobs.current.has(job.id)) void refresh(false).catch(e => setQueueError(String(e)));
+    });
+    const faultOff = listen<string>("queue-error", e => { if (active) { setQueueError(e.payload); setError(e.payload); setData(d => d ? { ...d, paused: true } : d); } });
+    const reconnect = () => { if (document.visibilityState === "visible") void refresh().catch(e => setError(String(e))); };
+    document.addEventListener("visibilitychange", reconnect);
     const unlisten = listen("import-progress", (e) =>
       setImportProgress(e.payload),
     );
@@ -385,7 +444,10 @@ export default function App() {
         setPreviewTask((t) => (t?.token === e.payload.token ? e.payload : t)),
     );
     return () => {
-      clearInterval(timer);
+      active = false;
+      document.removeEventListener("visibilitychange", reconnect);
+      void jobsOff.then(f => f());
+      void faultOff.then(f => f());
       void unlisten.then((f) => f());
       void off.then((f) => f());
     };
@@ -403,8 +465,7 @@ export default function App() {
     setEditingId(null);
     setSelected([]);
     setPlaying(false);
-    pending.current = { local: 0, play: false };
-    setSwitchingSource(true);
+    beginSeek(0, false, assets[0]);
     undo.current = [];
     redo.current = [];
     video.current?.pause();
@@ -428,19 +489,7 @@ export default function App() {
           }
         : d,
     );
-    setSaved("保存中…");
-    saveChain.current = saveChain.current
-      .catch(() => {})
-      .then(() => invoke("save_session", { session: next }))
-      .then(() => {
-        setSaved("已保存");
-        saveError.current = "";
-      })
-      .catch((e) => {
-        setSaved("保存失败");
-        saveError.current = String(e);
-        setError(String(e));
-      });
+    saves.edit(next);
   };
   const saveMatches = (matches: Match[], history = true) =>
     session &&
@@ -453,36 +502,20 @@ export default function App() {
     const t = Math.max(0, Math.min(total, Math.round(us)));
     const loc = locate(assets, t);
     setPlayhead(t);
-    pending.current = { local: loc.local, play: auto && t < total };
+    beginSeek(loc.local, auto && t < total, assets[loc.index]);
     if (
-      video.current?.dataset.assetId === assets[loc.index]?.id &&
+      video.current && validMedia(video.current) &&
       video.current &&
       video.current.readyState >= 1
     ) {
-      video.current.currentTime = loc.local / 1e6;
-      finishSeek(video.current);
+      try {
+        video.current.dataset.seekRequest = String(pending.current?.id);
+        video.current.currentTime = loc.local / 1e6;
+        finishSeek(video.current);
+      } catch { failSeek("无法定位，请检查素材或生成预览代理。"); }
     } else {
       video.current?.pause();
-      setSwitchingSource(true);
       setSourceIndex(loc.index);
-    }
-  };
-  const finishSeek = (v: HTMLVideoElement) => {
-    const target = pending.current;
-    if (
-      v !== video.current ||
-      !target ||
-      v.seeking ||
-      v.readyState < 2 ||
-      Math.abs(v.currentTime - target.local / 1e6) > 0.15
-    )
-      return;
-    pending.current = null;
-    setSwitchingSource(false);
-    if (target.play) void v.play().catch((e) => setError(String(e)));
-    else {
-      v.pause();
-      setPlaying(false);
     }
   };
   const toggle = () => {
@@ -575,7 +608,7 @@ export default function App() {
     const key = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       if (
-        modal ||
+        modal || publicationOpen ||
         document.querySelector("dialog[open]") ||
         target.closest("input,textarea,select,[contenteditable=true]")
       )
@@ -644,12 +677,8 @@ export default function App() {
           video.current &&
           video.current === previewVideo
         ) {
-          pending.current = {
-            local: Math.round(video.current.currentTime * 1e6),
-            play: !video.current.paused,
-          };
-          setSwitchingSource(true);
-        }
+          beginSeek(Math.round(video.current.currentTime * 1e6), !video.current.paused, current, p.path);
+            }
         setPreviews((old) => [
           ...old.filter((x) => x.asset_id !== p.asset_id || x.kind !== p.kind),
           p,
@@ -660,7 +689,7 @@ export default function App() {
     });
   useEffect(() => {
     if (modal === "export" && session && selected.length)
-      void saveChain.current
+      void saves.flush()
         .then(() =>
           invoke<string[]>("enqueue", {
             sessionId: session.id,
@@ -695,6 +724,7 @@ export default function App() {
       ),
     ].slice(0, 50);
   const saveTags = () => {
+    localStorage.setItem("rallycut-tags", JSON.stringify(normalizedTags()));
     setQuickTags(normalizedTags());
     setTagEditor(false);
   };
@@ -703,18 +733,36 @@ export default function App() {
     folderRule !== (data?.settings.folder_template || "{date}-日常羽毛球") ||
     presetName !==
       (preferences.presets.find((p) => p.id === presetId)?.name ?? "");
+  const isDirty = (kind: typeof modal | "tags") =>
+    kind === "tags" ? JSON.stringify(normalizedTags()) !== JSON.stringify(quickTags)
+      : kind === "settings" ? JSON.stringify(config) !== JSON.stringify(data?.settings)
+      : kind === "export" ? exportDirty() : false;
+  const transition = (action: () => void) => {
+    if (busy || closing || closePrompt) return;
+    if (publicationOpen) { publicationGuard.current(() => { setPublicationOpen(false); action(); }); return; }
+    const kind = tagEditor ? "tags" : modal;
+    if (isDirty(kind)) {
+      deferredTransition.current = action;
+      setCloseError("");
+      setClosePrompt(kind as "settings" | "export" | "tags");
+    } else { setTagEditor(false); setModal(null); action(); }
+  };
+  transitionRef.current = transition;
+  const finishTransition = () => {
+    const action = deferredTransition.current;
+    deferredTransition.current = null;
+    action?.();
+  };
+  const cancelTransition = () => { deferredTransition.current = null; setClosePrompt(null); };
+  const openModal = (kind: "import" | "settings" | "export") => transition(() => {
+    if (kind === "settings") setConfig(data?.settings);
+    setModal(kind);
+  });
   const requestClose = (
     kind: "settings" | "export" | "tags" | "import" | null = modal,
   ) => {
     if (busy || closing) return;
-    const dirty =
-      kind === "tags"
-        ? JSON.stringify(normalizedTags()) !== JSON.stringify(quickTags)
-        : kind === "settings"
-          ? JSON.stringify(config) !== JSON.stringify(data?.settings)
-          : kind === "export"
-            ? exportDirty()
-            : false;
+    const dirty = isDirty(kind);
     if (dirty) {
       setCloseError("");
       setClosePrompt(kind as "settings" | "export" | "tags");
@@ -765,6 +813,7 @@ export default function App() {
         setModal(null);
       }
       setClosePrompt(null);
+      finishTransition();
     } catch (e) {
       setCloseError(String(e));
     } finally {
@@ -781,6 +830,7 @@ export default function App() {
       setModal(null);
     }
     setClosePrompt(null);
+    finishTransition();
   };
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
@@ -844,7 +894,7 @@ export default function App() {
     });
   const showSettings = () => {
     setConfig(data?.settings);
-    setModal("settings");
+    openModal("settings");
   };
   const configure = (key: keyof Settings) =>
     run(async () => {
@@ -856,8 +906,7 @@ export default function App() {
   const exportSelected = () =>
     run(async () => {
       if (!session) return;
-      await saveChain.current;
-      if (saveError.current) throw Error("比赛标记尚未保存，请先解决保存错误");
+      await saves.flush();
       await saveExportSettings();
       await invoke("enqueue", {
         sessionId: session.id,
@@ -984,8 +1033,7 @@ export default function App() {
     setBusy(true);
     setRemoveError("");
     try {
-      await saveChain.current;
-      if (saveError.current) throw Error(saveError.current);
+      await saves.flush();
       if (removal.kind === "import") {
         setPaths((paths) => paths.filter((p) => p !== removal.id));
         setRemoval(null);
@@ -1006,7 +1054,7 @@ export default function App() {
       setSourceIndex(0);
       setMarkIn(0);
       setMarkOut(0);
-      pending.current = { local: 0, play: false };
+      beginSeek(0, false, assets[0]);
       video.current?.pause();
       setPlaying(false);
       if (video.current && video.current.readyState >= 1) {
@@ -1103,17 +1151,16 @@ export default function App() {
           {session?.name ?? "工作区"}
           {session && <small>{session.date}</small>}
         </div>
-        <button onClick={() => setModal("export")} title="查看和保存导出设置">
+        <button onClick={() => openModal("export")} title="查看和保存导出设置">
           导出设置
         </button>
+        <button onClick={() => transition(() => { setQueue(false); setPublicationOpen(true); })}>B 站发布</button>
         <UpdateCenter
           blocked={
-            busy || !!previewTask || detecting || activeJobs > 0 || !!modal
+            busy || !!previewTask || detecting || activeJobs > 0 || !!modal || publicationActive || publicationOpen
           }
           beforeInstall={async () => {
-            await saveChain.current;
-            if (saveError.current)
-              throw new Error("比赛标记尚未保存，请先解决保存错误");
+            await saves.flush();
           }}
         />
         <button onClick={showSettings} title="设置">
@@ -1127,7 +1174,7 @@ export default function App() {
             setSelected((s) =>
               s.length ? s : session!.matches.map((m) => m.id),
             );
-            setModal("export");
+            openModal("export");
           }}
         >
           <Download size={16} />
@@ -1187,7 +1234,7 @@ export default function App() {
             </div>
             <button
               className="import-button"
-              onClick={() => setModal("import")}
+              onClick={() => openModal("import")}
             >
               <Plus size={16} />
               导入素材
@@ -1323,6 +1370,7 @@ export default function App() {
             <span className="save-status">
               <Check size={12} />
               {saved}
+              {saved === "保存失败" && <button onClick={() => void run(() => saves.flush(true))}>重试保存</button>}
             </span>
           </div>
           <div
@@ -1336,6 +1384,7 @@ export default function App() {
                 });
             }}
           >
+            {seekError && <div className="seek-status" role="alert">{seekError}<button onClick={() => { seek(playhead, false); video.current?.load(); }}>重试定位</button></div>}
             {switchingSource && current?.available && (
               <span className="seek-status" role="status">
                 正在定位…
@@ -1345,14 +1394,16 @@ export default function App() {
               current.available ? (
                 <video
                   key={
-                    current.id +
+                    sessionId + ":" + current.id +
                     (previews.find(
                       (p) => p.asset_id === current.id && p.kind === "proxy",
                     )?.path ?? current.path)
                   }
-                  style={{ visibility: switchingSource ? "hidden" : "visible" }}
+                  style={{ visibility: switchingSource || seekError ? "hidden" : "visible" }}
                   ref={video}
                   data-asset-id={current.id}
+                  data-session-id={sessionId}
+                  data-path={mediaPath(current)}
                   src={convertFileSrc(
                     previews.find(
                       (p) => p.asset_id === current.id && p.kind === "proxy",
@@ -1360,10 +1411,15 @@ export default function App() {
                   )}
                   onLoadedMetadata={(e) => {
                     const v = e.currentTarget;
-                    if (v !== video.current) return;
+                    if (!validMedia(v)) return;
                     v.playbackRate = speed;
-                    if (pending.current)
-                      v.currentTime = pending.current.local / 1e6;
+                    if (pending.current) {
+                      try {
+                        v.dataset.seekRequest = String(pending.current.id);
+                        v.currentTime = pending.current.local / 1e6;
+                        finishSeek(v);
+                      } catch { failSeek("无法定位，请重试或生成预览代理。"); }
+                    }
                   }}
                   onLoadedData={(e) => finishSeek(e.currentTarget)}
                   onCanPlay={(e) => finishSeek(e.currentTarget)}
@@ -1384,17 +1440,12 @@ export default function App() {
                   }}
                   onEnded={() => {
                     if (sourceIndex < assets.length - 1) {
-                      pending.current = { local: 0, play: true };
-                      setSwitchingSource(true);
-                      setSourceIndex((i) => i + 1);
+                      seek(offset + current.duration_us, true);
                     } else setPlaying(false);
                   }}
-                  onError={() => {
-                    pending.current = null;
-                    setSwitchingSource(false);
-                    setError(
-                      "当前素材无法播放或定位。请检查编码格式与文件可用性。",
-                    );
+                  onError={(e) => {
+                    if (e.currentTarget !== video.current) return;
+                    failSeek("当前素材无法播放或定位，请重试或生成预览代理。");
                   }}
                   onClick={toggle}
                 />
@@ -1431,7 +1482,7 @@ export default function App() {
                 </div>
                 <h1>从一场拍摄开始</h1>
                 <p>导入原片，标记每局的开始与结束。</p>
-                <button className="primary" onClick={() => setModal("import")}>
+                <button className="primary" onClick={() => openModal("import")}>
                   <Plus size={17} />
                   导入素材
                 </button>
@@ -1468,6 +1519,20 @@ export default function App() {
                 <SkipForward size={17} />
               </button>
             </div>
+            <button disabled={!current?.available || switchingSource || !!seekError || coverBusy}
+              onClick={() => {
+                const media = video.current;
+                if (!current || !media || media.readyState < 2) return;
+                media.pause();
+                const assetId = current.id;
+                const timeUs = Math.round(media.currentTime * 1e6);
+                setCoverBusy(true); setCoverNotice("");
+                void invoke("capture_cover_candidate", { sessionId, assetId, timeUs })
+                  .then(() => setCoverNotice("已加入封面备选"))
+                  .catch(e => setError(String(e).includes("not found") ? "请在当前投稿处理完成后重新启动新版应用，再添加封面备选。" : String(e)))
+                  .finally(() => setCoverBusy(false));
+              }}>{coverBusy ? "正在保存封面…" : "加入封面备选"}</button>
+            {coverNotice && <span className="muted" role="status">{coverNotice}</span>}
             <SpeedMenu
               value={speed}
               change={(n) => {
@@ -1895,7 +1960,7 @@ export default function App() {
             <button
               className="primary"
               disabled={!selected.length}
-              onClick={() => setModal("export")}
+              onClick={() => openModal("export")}
             >
               <Download size={15} />
               导出 {selected.length || ""}
@@ -2226,7 +2291,7 @@ export default function App() {
             <button onClick={() => setTagText(defaultTags.join("\n"))}>
               恢复默认
             </button>
-            <button className="primary" onClick={saveTags}>
+            <button className="primary" onClick={() => void run(async () => saveTags())}>
               保存标签
             </button>
           </div>
@@ -2270,17 +2335,26 @@ export default function App() {
           </div>
         </LocalDialog>
       )}
+      <PublicationPanel open={publicationOpen} close={() => setPublicationOpen(false)} sessionId={sessionId} selected={selected} preset={preset} beforeCreate={() => saves.flush()} guardRef={publicationGuard} activeChanged={setPublicationActive} />
+      {exitError !== null && <LocalDialog title="标记尚未保存" close={() => setExitError(null)}>
+        <p role="alert">{exitError}</p>
+        <div className="modal-actions">
+          <button onClick={() => setExitError(null)}>取消退出</button>
+          <button onClick={() => void flushAndExit(true)}>放弃未保存标记并退出</button>
+          <button onClick={() => void flushAndExit()}>重试保存并退出</button>
+        </div>
+      </LocalDialog>}
       {closePrompt && (
         <LocalDialog
           title="保存更改？"
           close={() => {
-            if (!closing) setClosePrompt(null);
+            if (!closing) cancelTransition();
           }}
         >
           <p>有尚未保存的更改，要保存后再关闭吗？</p>
           {closeError && <p role="alert">{closeError}</p>}
           <div className="modal-actions">
-            <button disabled={closing} onClick={() => setClosePrompt(null)}>
+            <button disabled={closing} onClick={cancelTransition}>
               继续编辑
             </button>
             <button disabled={closing} onClick={discardAndClose}>

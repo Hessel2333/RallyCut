@@ -1,6 +1,6 @@
 use rallycut_lib::{engine, media, model::*};
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     sync::atomic::{AtomicBool, Ordering},
 };
 fn tool(n: &str) -> String {
@@ -15,6 +15,107 @@ fn tool(n: &str) -> String {
     })
     .to_string_lossy()
     .into()
+}
+#[test]
+#[ignore = "Requires native FFmpeg with libx264 and ffprobe"]
+fn relocated_retry_and_post_commit_recovery_preserve_content() {
+    use rallycut_lib::{artifacts, store::Store};
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.mp4");
+    ff(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=30000/1001:duration=2",
+        "-c:v",
+        "libx264",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-colorspace",
+        "bt709",
+        source.to_str().unwrap(),
+    ]);
+    let mut j = job(
+        vec![asset(&source)],
+        &dir.path().join("final.mp4"),
+        100_000,
+        1_100_000,
+    );
+    // This relocation requires a historical full identity, not the sampled
+    // reference fixture used by the unrelated playback/encoding tests.
+    j.assets[0].sha256 = media::hash_file(&source, &AtomicBool::new(false), |_| {}).unwrap();
+    j.assets[0].verification = "verified-copy".into();
+    let original = serde_json::to_value(&j).unwrap();
+    let db_path = dir.path().join("isolated.sqlite3");
+    let db = Store::open(&db_path).unwrap();
+    db.put("asset", &j.assets[0].id, &j.assets[0]).unwrap();
+    db.put("job", &j.id, &j).unwrap();
+    let moved = dir.path().join("moved.mp4");
+    std::fs::rename(&source, &moved).unwrap();
+    let cancel = AtomicBool::new(false);
+    assert!(engine::export(
+        &mut j,
+        &tool("ffmpeg"),
+        &tool("ffprobe"),
+        &[],
+        &cancel,
+        |_| {}
+    )
+    .is_err());
+    let mut relocated = j.assets[0].clone();
+    relocated.path = moved.to_string_lossy().into();
+    media::verify_identity(&moved, &relocated.sha256).unwrap();
+    db.put("asset", &relocated.id, &relocated).unwrap();
+    let mut runtime = engine::resolve_locations(&j, &db.list("asset").unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&runtime.segment).unwrap(),
+        original["segment"]
+    );
+    assert_eq!(
+        serde_json::to_value(&runtime.preset).unwrap(),
+        original["preset"]
+    );
+    engine::export(
+        &mut runtime,
+        &tool("ffmpeg"),
+        &tool("ffprobe"),
+        &[],
+        &cancel,
+        |_| {},
+    )
+    .unwrap();
+    let final_hash = media::hash_file(Path::new(&j.output), &cancel, |_| {}).unwrap();
+    // Crash after filesystem commit, before final SQLite transaction.
+    j.status = "validating".into();
+    db.put("job", &j.id, &j).unwrap();
+    drop(db);
+    let db = Store::open(&db_path).unwrap();
+    let mut recovered: Job = db.get("job", &j.id).unwrap();
+    assert_eq!(recovered.status, "interrupted");
+    let artifact = artifacts::recover(&recovered, &cancel).unwrap();
+    assert_eq!(artifact.file_sha256, final_hash);
+    assert_ne!(artifact.file_sha256, artifact.content_fingerprint);
+    recovered.status = "completed".into();
+    db.finish_job(&recovered, Some(&artifact)).unwrap();
+    db.put("publication", "evidence", &serde_json::json!({"id":"evidence","draft_id":"d","account_id":"test","payload":{},"status":"submitted","aid":1,"bvid":null,"error":"","created_ms":0,"checked_ms":null,"platform_status":""})).unwrap();
+    db.delete_jobs(&[j.id.clone()]).unwrap();
+    assert_eq!(
+        db.get::<artifacts::ExportArtifact>("artifact", &j.id)
+            .unwrap()
+            .file_sha256,
+        final_hash
+    );
+    assert!(db
+        .get::<serde_json::Value>("publication", "evidence")
+        .is_ok());
+    assert_eq!(
+        media::hash_file(Path::new(&j.output), &cancel, |_| {}).unwrap(),
+        final_hash
+    );
+    std::fs::write(&j.output, b"changed").unwrap();
+    assert!(artifacts::recover(&recovered, &cancel).is_err());
 }
 fn ff(args: &[&str]) {
     let o = media::command(&tool("ffmpeg"))
@@ -174,12 +275,9 @@ fn pcm(p: &Path, start: &str, duration: &str) -> Vec<f64> {
 #[test]
 #[ignore = "Requires native FFmpeg and generates synthetic fixtures"]
 fn real_cross_file_export() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join(".test-data");
-    std::fs::create_dir_all(&root).unwrap();
-    let dir = root.join(format!("run-{}", id()));
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let dir = root.join("cross-file");
     std::fs::create_dir(&dir).unwrap();
     let source = dir.join("连续源.mp4");
     let a = dir.join("A 中文 ' 01.mp4");
@@ -194,8 +292,6 @@ fn real_cross_file_export() {
         "lavfi",
         "-i",
         "aevalsrc=0.15*sin(2*PI*(440*t+80*max(t-15\\,0)^2)):s=48000:d=30",
-        "-vf",
-        r"drawtext=fontfile='C\:/Windows/Fonts/consola.ttf':text='%{pts\:hms}':x=12:y=12:fontsize=24:fontcolor=white:box=1:boxcolor=black",
         "-c:v",
         "libx264",
         "-preset",
@@ -483,4 +579,71 @@ fn fractional_rate_mixed_parameters_and_proxy() {
     )
     .unwrap();
     assert!(Path::new(&thumb.path).is_file());
+}
+
+#[test]
+#[ignore = "Requires native FFmpeg with libx264 and ffprobe"]
+fn cover_frame_persists_independently_and_never_overwrites() {
+    use rallycut_lib::{
+        covers::{capture, image_data, CoverCandidate},
+        store::Store,
+    };
+    let d = tempfile::tempdir().unwrap();
+    let source = d.path().join("video.mp4");
+    ff(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=30:duration=2",
+        "-c:v",
+        "libx264",
+        source.to_str().unwrap(),
+    ]);
+    let before = std::fs::read(&source).unwrap();
+    let cover = d.path().join("frame.jpg");
+    let cancel = AtomicBool::new(false);
+    capture(
+        &tool("ffmpeg"),
+        source.to_str().unwrap(),
+        1_000_000,
+        &cover,
+        &cancel,
+    )
+    .unwrap();
+    assert!(image_data(&cover)
+        .unwrap()
+        .starts_with("data:image/jpeg;base64,"));
+    let probe = media::probe(&tool("ffprobe"), &cover).unwrap();
+    assert!(probe.to_string().contains("1280"));
+    let bytes = std::fs::read(&cover).unwrap();
+    assert!(capture(
+        &tool("ffmpeg"),
+        source.to_str().unwrap(),
+        0,
+        &cover,
+        &cancel
+    )
+    .is_err());
+    assert_eq!(std::fs::read(&cover).unwrap(), bytes);
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    let dbpath = d.path().join("isolated.sqlite3");
+    let candidate = CoverCandidate {
+        id: "c".into(),
+        session_id: "s".into(),
+        asset_id: "a".into(),
+        name: "frame".into(),
+        time_us: 1_000_000,
+        path: cover.to_string_lossy().into(),
+    };
+    {
+        let db = Store::open(&dbpath).unwrap();
+        db.put("cover_candidate", "c", &candidate).unwrap();
+    }
+    let db = Store::open(&dbpath).unwrap();
+    let restored: CoverCandidate = db.get("cover_candidate", "c").unwrap();
+    assert_eq!(restored.time_us, 1_000_000);
+    assert_eq!(
+        image_data(Path::new(&restored.path)).unwrap(),
+        image_data(&cover).unwrap()
+    );
 }

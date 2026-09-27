@@ -193,6 +193,8 @@ pub fn export_folder(template: &str, date: &str, name: &str) -> Result<String> {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {
+    pub queue_sequence: u64,
+    pub queue_error: String,
     pub match_numbers: std::collections::HashMap<String, usize>,
     pub assets: Vec<Asset>,
     pub sessions: Vec<Session>,

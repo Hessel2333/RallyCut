@@ -35,6 +35,36 @@ pub fn fingerprint(segment: &Match, assets: &[Asset], preset: &Preset) -> String
         Sha256::digest(serde_json::to_vec(&(content, preset)).unwrap())
     )
 }
+/// Resolve only runtime locations; never rebuild a queued segment or preset.
+pub fn resolve_locations(job: &Job, assets: &[Asset]) -> Result<Job> {
+    let mut runtime = job.clone();
+    for original in &mut runtime.assets {
+        let location = assets
+            .iter()
+            .find(|a| a.id == original.id)
+            .ok_or_else(|| format!("素材引用缺失：{}，请重新定位", original.name))?;
+        if original.sha256.is_empty()
+            || location.sha256 != original.sha256
+            || location.size != original.size
+        {
+            return Err(format!(
+                "素材身份不一致：{}，不能替换旧任务内容",
+                original.name
+            ));
+        }
+        if original.verification == "verified-copy" && location.verification != "verified-copy" {
+            return Err("不能降低旧任务的完整性验证等级".into());
+        }
+        if original.path != location.path && original.sha256.starts_with("sample-v1-") {
+            return Err(
+                "旧任务仅保存了抽样身份，无法确认移动后的完整内容；请核对素材并新建导出任务".into(),
+            );
+        }
+        original.path = location.path.clone();
+        original.available = location.available;
+    }
+    Ok(runtime)
+}
 pub fn build_args(job: &Job, encoder: &str, partial: &Path) -> Result<Vec<String>> {
     validate_ranges(&job.segment.ranges, &job.assets)?;
     let p = &job.preset;
@@ -232,7 +262,7 @@ pub fn export(
     let parent = out.parent().ok_or("输出目录无效")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     if out.exists() {
-        return Err("输出文件已存在；请重新加入队列以生成新名称".into());
+        return Err("输出文件已存在；请通过队列恢复核对，禁止覆盖".into());
     }
     let partial = parent.join(format!(".{}.partial.mp4", job.id));
     if partial.exists() {
@@ -338,6 +368,7 @@ pub fn export(
         if cancel.load(Ordering::Relaxed) {
             return Err("已取消".into());
         }
+        crate::artifacts::prepare_commit(job, &partial, ffprobe, cancel)?;
         commit_no_replace(&partial, &out)?;
         job.validation = "基本验证 + 首尾及拼接边界抽样解码（非完整解码）".into();
         Ok(())

@@ -1,6 +1,6 @@
 [package]
 name = "rallycut"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 
@@ -21,6 +21,10 @@ serde_json = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
+reqwest = { version = "=0.13.5", features = ["blocking", "json", "form", "query"] }
+keyring = { version = "=3.6.3", features = ["windows-native", "apple-native"] }
+qrcode = { version = "=0.14.1", default-features = false, features = ["svg"] }
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

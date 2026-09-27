@@ -52,6 +52,8 @@ export type Settings = {
   folder_template?: string;
 };
 export type Snapshot = {
+  queue_sequence?: number;
+  queue_error?: string;
   match_numbers: Record<string, number>;
   assets: Asset[];
   sessions: Session[];

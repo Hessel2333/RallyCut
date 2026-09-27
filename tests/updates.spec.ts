@@ -20,6 +20,7 @@ async function setup(page: Page, options: { previous?: string; auto?: boolean; r
       invoke: async (cmd: string, args: any) => {
         w.calls.push(cmd);
         if (cmd === "plugin:app|version") return options.currentVersion;
+        if (cmd === "publication_snapshot") return { drafts: [], artifacts: [], uploads: [], publications: [], active: false };
         if (cmd === "snapshot") return { sessions: [], assets: [], jobs: options.blocked ? [{ id: "active", status: "exporting" }] : [], match_numbers: {}, paused: false, data_dir: "", settings: { ffmpeg: "", ffprobe: "", library: "", output: "" } };
         if (cmd === "tool_status") return { ffmpeg: { available: false }, ffprobe: { available: false } };
         if (cmd === "cached_previews") return [];

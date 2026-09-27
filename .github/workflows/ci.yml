@@ -22,9 +22,38 @@ jobs:
         with:
           workspaces: src-tauri -> target
       - run: npm ci
+      - name: Install native FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install ffmpeg --yes --no-progress
+          $binary = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
+          "RALLYCUT_FFMPEG_DIR=$(Split-Path $binary)" >> $env:GITHUB_ENV
+      - name: Install native FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ffmpeg
+          echo "RALLYCUT_FFMPEG_DIR=$(dirname "$(command -v ffmpeg)")" >> "$GITHUB_ENV"
       - run: node scripts/check-release.mjs
       - run: npx playwright install chromium
       - run: npm run test:e2e
       - run: npm test
       - run: npm run build
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+  ffmpeg-integration:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Install and verify native media tools
+        run: |
+          brew install ffmpeg
+          ffmpeg -version
+          ffprobe -version
+          ffmpeg -hide_banner -encoders | grep libx264
+          ffmpeg -hide_banner -encoders | grep libx265
+          echo "RALLYCUT_FFMPEG_DIR=$(dirname "$(command -v ffmpeg)")" >> "$GITHUB_ENV"
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --test export_integration -- --ignored --nocapture

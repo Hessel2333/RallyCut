@@ -1,7 +1,11 @@
+pub mod artifacts;
+pub mod bilibili;
+pub mod covers;
 pub mod engine;
 pub mod media;
 pub mod model;
 pub mod preview;
+pub mod publication;
 pub mod store;
 
 use model::*;
@@ -9,7 +13,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -19,8 +23,15 @@ use tauri_plugin_dialog::DialogExt;
 
 pub struct AppState {
     pub db: Mutex<store::Store>,
+    pub publication: publication::Runtime,
     pub data: PathBuf,
     pub paused: AtomicBool,
+    pub queue_error: Mutex<String>,
+    pub queue_sequence: AtomicU64,
+    pub live_jobs: Mutex<HashMap<String, Job>>,
+    pub pending_completion: Mutex<Option<(Job, Option<artifacts::ExportArtifact>)>>,
+    pub exit_authorized: AtomicBool,
+    pub update_active: AtomicBool,
     pub cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub granted: Mutex<Vec<PathBuf>>,
     pub hardware: Mutex<Vec<String>>,
@@ -90,11 +101,25 @@ fn snapshot(s: State<AppState>) -> Result<Snapshot> {
     for a in &mut assets {
         a.available = Path::new(&a.path).is_file();
     }
+    let live = s.live_jobs.lock().unwrap();
+    let jobs = db
+        .list::<Job>("job")?
+        .into_iter()
+        .map(|j| {
+            if j.status == "preparing" {
+                live.get(&j.id).cloned().unwrap_or(j)
+            } else {
+                j
+            }
+        })
+        .collect();
     Ok(Snapshot {
+        queue_sequence: s.queue_sequence.load(Ordering::SeqCst),
+        queue_error: s.queue_error.lock().unwrap().clone(),
         match_numbers: db.match_numbers()?,
         assets,
         sessions: db.list("session")?,
-        jobs: db.list("job")?,
+        jobs,
         settings: db.get("settings", "main").unwrap_or_default(),
         paused: s.paused.load(Ordering::Relaxed),
         data_dir: s.data.to_string_lossy().into_owned(),
@@ -487,8 +512,15 @@ fn queue_action(s: State<AppState>, action: String, job_id: Option<String>) -> R
         return Ok(());
     }
     if action == "resume" {
-        s.paused.store(false, Ordering::Relaxed);
+        let mut pending = s.pending_completion.lock().unwrap();
+        if let Some((job, artifact)) = pending.as_ref() {
+            s.db.lock().unwrap().finish_job(job, artifact.as_ref())?;
+            *pending = None;
+        }
+        s.db.lock().unwrap().list::<Job>("job")?;
         s.db.lock().unwrap().put("runtime", "paused", &false)?;
+        s.queue_error.lock().unwrap().clear();
+        s.paused.store(false, Ordering::Relaxed);
         return Ok(());
     }
     let key = job_id.ok_or("任务不存在")?;
@@ -501,9 +533,6 @@ fn queue_action(s: State<AppState>, action: String, job_id: Option<String>) -> R
     let db = s.db.lock().unwrap();
     let mut j: Job = db.get("job", &key)?;
     if action == "retry" && ["failed", "cancelled", "interrupted"].contains(&j.status.as_str()) {
-        if Path::new(&j.output).exists() {
-            return Err("目标已存在，请重新导出以创建新名称".into());
-        }
         j.status = "waiting".into();
         j.error.clear();
         j.progress = 0.0;
@@ -529,20 +558,28 @@ fn open_output(s: State<AppState>) -> Result<()> {
 }
 #[tauri::command]
 fn begin_app_update(s: State<AppState>) -> Result<()> {
-    let db = s.db.lock().unwrap();
-    let jobs = db.list::<Job>("job")?;
-    if jobs
-        .iter()
-        .any(|j| ["waiting", "preparing", "exporting", "validating"].contains(&j.status.as_str()))
-        || !s.cancels.lock().unwrap().is_empty()
-    {
-        return Err("请等待导入、预览或导出任务结束后再更新".into());
+    s.update_active.store(true, Ordering::SeqCst);
+    let result = (|| {
+        let db = s.db.lock().unwrap();
+        let jobs = db.list::<Job>("job")?;
+        if jobs.iter().any(|j| {
+            ["waiting", "preparing", "exporting", "validating"].contains(&j.status.as_str())
+        }) || s.publication.active.load(Ordering::SeqCst)
+            || !s.cancels.lock().unwrap().is_empty()
+        {
+            return Err("请等待导入、预览或导出任务结束后再更新".into());
+        }
+        s.paused.store(true, Ordering::SeqCst);
+        Ok(())
+    })();
+    if result.is_err() {
+        s.update_active.store(false, Ordering::SeqCst);
     }
-    s.paused.store(true, Ordering::SeqCst);
-    Ok(())
+    result
 }
 #[tauri::command]
 fn end_app_update(s: State<AppState>) -> Result<()> {
+    s.update_active.store(false, Ordering::SeqCst);
     let paused =
         s.db.lock()
             .unwrap()
@@ -550,6 +587,27 @@ fn end_app_update(s: State<AppState>) -> Result<()> {
             .unwrap_or(false);
     s.paused.store(paused, Ordering::SeqCst);
     Ok(())
+}
+fn emit_job(app: &tauri::AppHandle, s: &AppState, job: &Job) {
+    let mut live = s.live_jobs.lock().unwrap();
+    live.insert(job.id.clone(), job.clone());
+    let sequence = s.queue_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+    let _ = app.emit(
+        "job-update",
+        serde_json::json!({"sequence": sequence, "job": { "id":job.id,"status":job.status,"progress":job.progress,"speed":job.speed,"error":job.error,"validation":job.validation,"output":job.output }}),
+    );
+}
+fn queue_fault(app: &tauri::AppHandle, s: &AppState, error: String) {
+    s.paused.store(true, Ordering::SeqCst);
+    *s.queue_error.lock().unwrap() = error.clone();
+    let _ = app.emit("queue-error", error);
+}
+#[tauri::command]
+fn authorize_exit(app: tauri::AppHandle) {
+    app.state::<AppState>()
+        .exit_authorized
+        .store(true, Ordering::SeqCst);
+    app.exit(0);
 }
 fn worker(app: tauri::AppHandle) {
     std::thread::spawn(move || loop {
@@ -563,15 +621,13 @@ fn worker(app: tauri::AppHandle) {
             if s.paused.load(Ordering::SeqCst) {
                 continue;
             }
-            db.list::<Job>("job")
-                .unwrap_or_default()
-                .into_iter()
-                .find(|j| j.status == "waiting")
-                .map(|mut j| {
-                    j.status = "preparing".into();
-                    let _ = db.put("job", &j.id, &j);
-                    j
-                })
+            match db.claim_next() {
+                Ok(next) => next,
+                Err(error) => {
+                    queue_fault(&app, &s, error);
+                    continue;
+                }
+            }
         };
         if let Some(mut job) = next {
             let c = Arc::new(AtomicBool::new(false));
@@ -581,23 +637,78 @@ fn worker(app: tauri::AppHandle) {
                 *s.hardware.lock().unwrap() = media::hardware(&t.ffmpeg.path);
             }
             let hw = s.hardware.lock().unwrap().clone();
+            let mut last_progress = std::time::Instant::now() - Duration::from_secs(1);
+            let mut last_status = String::new();
             let update = |j: &Job| {
-                let _ = s.db.lock().unwrap().put("job", &j.id, j);
-                let _ = app.emit("job-update", j);
-            };
-            let result = engine::export(&mut job, &t.ffmpeg.path, &t.ffprobe.path, &hw, &c, update);
-            job.status = match result {
-                Ok(()) => "completed".into(),
-                Err(e) => {
-                    job.error = e;
-                    if c.load(Ordering::Relaxed) {
-                        "cancelled".into()
-                    } else {
-                        "failed".into()
-                    }
+                // Progress is ephemeral; final state is committed separately and must succeed.
+                if j.status != last_status || last_progress.elapsed() >= Duration::from_millis(200)
+                {
+                    emit_job(&app, &s, j);
+                    last_status = j.status.clone();
+                    last_progress = std::time::Instant::now();
                 }
             };
-            update(&job);
+            let result = (|| {
+                if Path::new(&job.output).exists() {
+                    return artifacts::recover(&job, &c);
+                }
+                let reusable =
+                    s.db.lock()
+                        .unwrap()
+                        .list::<artifacts::ExportArtifact>("artifact")?;
+                for artifact in reusable
+                    .into_iter()
+                    .filter(|a| a.content_fingerprint == job.fingerprint)
+                {
+                    if artifacts::verify(&artifact, &c).is_ok() {
+                        job.output = artifact.path.clone();
+                        job.validation = artifact.validation.clone();
+                        return Ok(artifact);
+                    }
+                }
+                let assets = s.db.lock().unwrap().list::<Asset>("asset")?;
+                let mut runtime = engine::resolve_locations(&job, &assets)?;
+                let result = engine::export(
+                    &mut runtime,
+                    &t.ffmpeg.path,
+                    &t.ffprobe.path,
+                    &hw,
+                    &c,
+                    update,
+                );
+                job.progress = runtime.progress;
+                job.speed = runtime.speed;
+                job.validation = runtime.validation;
+                job.error = runtime.error;
+                result?;
+                artifacts::recover(&job, &c)
+            })();
+            let artifact = match result {
+                Ok(artifact) => {
+                    job.status = "completed".into();
+                    job.progress = 1.0;
+                    job.validation = artifact.validation.clone();
+                    Some(artifact)
+                }
+                Err(error) => {
+                    job.error = error;
+                    job.status = if c.load(Ordering::Relaxed) {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    }
+                    .into();
+                    None
+                }
+            };
+            let committed = s.db.lock().unwrap().finish_job(&job, artifact.as_ref());
+            if let Err(error) = committed {
+                *s.pending_completion.lock().unwrap() = Some((job.clone(), artifact));
+                queue_fault(&app, &s, format!("最终状态未保存：{error}。请恢复数据库后继续队列；重启后可重试任务核对已完成文件。"));
+            } else {
+                emit_job(&app, &s, &job);
+            }
+            s.live_jobs.lock().unwrap().remove(&job.id);
             s.cancels.lock().unwrap().remove(&job.id);
         }
     });
@@ -608,6 +719,10 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.emit("exit-requested", ());
+            }
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 let app = window.app_handle().clone();
                 let paths = paths.clone();
@@ -669,8 +784,15 @@ pub fn run() {
             let paused = db.get::<bool>("runtime", "paused").unwrap_or(false);
             app.manage(AppState {
                 db: Mutex::new(db),
+                publication: publication::Runtime::default(),
                 data,
                 paused: AtomicBool::new(paused),
+                queue_error: Mutex::new(String::new()),
+                queue_sequence: AtomicU64::new(0),
+                live_jobs: Mutex::new(HashMap::new()),
+                pending_completion: Mutex::new(None),
+                exit_authorized: AtomicBool::new(false),
+                update_active: AtomicBool::new(false),
                 cancels: Mutex::new(HashMap::new()),
                 granted: Mutex::new(vec![]),
                 hardware: Mutex::new(vec![]),
@@ -690,6 +812,26 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            publication::publication_snapshot,
+            publication::publication_login,
+            publication::publication_poll_login,
+            publication::publication_account,
+            publication::publication_logout,
+            publication::publication_categories,
+            publication::publication_save,
+            publication::publication_import_artifact,
+            publication::publication_from_matches,
+            publication::publication_upload,
+            publication::publication_submit,
+            publication::publication_cancel,
+            publication::publication_check,
+            publication::publication_open,
+            publication::publication_resolve,
+            publication::publication_capture_cover,
+            covers::cover_candidates,
+            covers::cover_preview,
+            covers::capture_cover_candidate,
+            authorize_exit,
             begin_app_update,
             end_app_update,
             snapshot,
@@ -720,6 +862,11 @@ pub fn run() {
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 let s = app.state::<AppState>();
+                if !s.exit_authorized.load(Ordering::SeqCst) {
+                    api.prevent_exit();
+                    let _ = app.emit("exit-requested", ());
+                    return;
+                }
                 s.paused.store(true, Ordering::Relaxed);
                 let cancels = s.cancels.lock().unwrap();
                 if !cancels.is_empty() {

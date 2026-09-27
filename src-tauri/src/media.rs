@@ -47,7 +47,13 @@ pub fn commit_no_replace(source: &Path, target: &Path) -> Result<()> {
     #[cfg(not(windows))]
     {
         fs::hard_link(source, target).map_err(|e| e.to_string())?;
-        fs::remove_file(source).map_err(|e| e.to_string())
+        fs::remove_file(source).map_err(|e| e.to_string())?;
+        if let Some(parent) = target.parent() {
+            File::open(parent)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 }
 pub fn probe(exe: &str, path: &Path) -> Result<Value> {
