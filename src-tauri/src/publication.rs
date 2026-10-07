@@ -558,6 +558,7 @@ pub async fn publication_from_matches(
                         vec![segment.id.clone()],
                         preset.clone(),
                         Some(false),
+                        None,
                     )?;
                     job_id =
                         s.db.lock()

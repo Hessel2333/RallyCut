@@ -403,6 +403,7 @@ mod tests {
                         id: format!("{id}-{start}"),
                         name: "男单".into(),
                         note: "".into(),
+                        chapters: vec![],
                         ranges: vec![Range {
                             asset_id: id.into(),
                             start_us: start,
@@ -463,6 +464,7 @@ mod tests {
                     end_us: 2,
                 }],
                 note: "".into(),
+                chapters: vec![],
             }],
         };
         s.put("session", "s", &v).unwrap();

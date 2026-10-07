@@ -1,4 +1,4 @@
-import type { Asset, Range, Match } from "./types";
+import type { Asset, Chapter, Range, Match } from "./types";
 export function orderedMatches(assets: Asset[], matches: Match[]) {
   return [...matches].sort(
     (a, b) => bounds(assets, a.ranges).start - bounds(assets, b.ranges).start,
@@ -46,8 +46,17 @@ export function splitSegment(
     matches.flatMap((m) =>
       m.id === found.id
         ? [
-            { ...m, ranges: mapRange(assets, b.start, time) },
-            { ...m, id, ranges: mapRange(assets, time, b.end) },
+            {
+              ...m,
+              ranges: mapRange(assets, b.start, time),
+              chapters: trimChapters(m.chapters, 0, time - b.start),
+            },
+            {
+              ...m,
+              id,
+              ranges: mapRange(assets, time, b.end),
+              chapters: trimChapters(m.chapters, time - b.start, b.end - time),
+            },
           ]
         : [m],
     ),
@@ -128,4 +137,14 @@ export function timelineGaps(assets: Asset[], matches: Match[]) {
   if (cursor < totalUs(assets))
     gaps.push({ start: cursor, end: totalUs(assets) });
   return gaps;
+}
+
+export function trimChapters(
+  chapters: Chapter[] | undefined,
+  delta: number,
+  duration: number,
+) {
+  return (chapters ?? [])
+    .map((c) => ({ ...c, offset_us: c.offset_us - delta }))
+    .filter((c) => c.offset_us >= 0 && c.offset_us < duration);
 }

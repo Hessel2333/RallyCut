@@ -1,5 +1,6 @@
 pub mod artifacts;
 pub mod bilibili;
+pub mod continuity;
 pub mod covers;
 pub mod engine;
 pub mod media;
@@ -414,6 +415,12 @@ fn remove_session_asset(s: State<AppState>, session_id: String, asset_id: String
         .unwrap()
         .remove_session_asset(&session_id, &asset_id)
 }
+#[derive(serde::Deserialize)]
+struct ClipSelection {
+    start_us: i64,
+    end_us: i64,
+}
+
 #[tauri::command]
 fn enqueue(
     s: State<AppState>,
@@ -421,14 +428,16 @@ fn enqueue(
     match_ids: Vec<String>,
     preset: Preset,
     dry_run: Option<bool>,
+    clip: Option<ClipSelection>,
 ) -> Result<Vec<String>> {
     let cfg = settings(&s);
     let db = s.db.lock().unwrap();
     let session: Session = db.get("session", &session_id)?;
-    if match_ids.is_empty()
-        || match_ids
-            .iter()
-            .any(|id| !session.matches.iter().any(|m| &m.id == id))
+    if clip.is_none()
+        && (match_ids.is_empty()
+            || match_ids
+                .iter()
+                .any(|id| !session.matches.iter().any(|m| &m.id == id)))
     {
         return Err("请选择当前拍摄中的比赛".into());
     }
@@ -436,11 +445,36 @@ fn enqueue(
     let mut jobs = db.list::<Job>("job")?;
     let mut outputs = vec![];
     let numbers = db.match_numbers()?;
+    let clip_match = if let Some(clip) = clip {
+        let ordered = session
+            .asset_ids
+            .iter()
+            .map(|id| {
+                assets
+                    .iter()
+                    .find(|a| &a.id == id)
+                    .cloned()
+                    .ok_or("素材不存在".to_string())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Some(Match {
+            id: format!("clip-{}", id()),
+            name: "精彩片段".into(),
+            note: "".into(),
+            chapters: vec![],
+            ranges: map_range(&ordered, clip.start_us, clip.end_us)?,
+        })
+    } else {
+        None
+    };
     let mut matches: Vec<_> = session
         .matches
         .iter()
         .filter(|m| match_ids.contains(&m.id))
         .collect();
+    if let Some(ref m) = clip_match {
+        matches = vec![m];
+    }
     matches.sort_by_key(|m| numbers.get(&m.id).copied().unwrap_or(0));
     for m in matches {
         let used: Vec<_> = assets
@@ -835,6 +869,7 @@ pub fn run() {
             begin_app_update,
             end_app_update,
             snapshot,
+            continuity::analyze_boundary,
             prepare_preview,
             cached_previews,
             choose_path,

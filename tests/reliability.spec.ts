@@ -343,3 +343,95 @@ test("editor captures the paused media position as a cover candidate", async ({ 
   expect(capture.timeUs).toBe(2000000);
   expect(await video.evaluate((v: HTMLVideoElement) => v.paused)).toBe(true);
 });
+
+async function immediateSaves(page: import('@playwright/test').Page) {
+  await page.evaluate(() => {
+    const w = window as any, previous = w.__TAURI_INTERNALS__.invoke;
+    w.enqueued = [];
+    w.__TAURI_INTERNALS__.invoke = async (cmd: string, args: any) => {
+      if (cmd === 'save_session') {
+        w.sessions = w.sessions.map((s: any) => s.id === args.session.id ? structuredClone(args.session) : s);
+        return null;
+      }
+      if (cmd === 'enqueue') { w.enqueued.push(args); return ['/tmp/精彩片段.mp4']; }
+      return previous(cmd, args);
+    };
+  });
+}
+
+test('same-file seek never hides the video and source-end commands preserve exact selection bounds', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', e => errors.push(e.message));
+  const video = page.locator('video');
+  await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.readyState)).toBeGreaterThanOrEqual(2);
+  await video.evaluate(v => {
+    (window as any).hiddenDuringSeek = false;
+    new MutationObserver(() => {
+      if ((v as HTMLElement).style.visibility === 'hidden') (window as any).hiddenDuringSeek = true;
+    }).observe(v, { attributes: true, attributeFilter: ['style'] });
+  });
+  await page.keyboard.press('ArrowRight');
+  await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.currentTime)).toBeCloseTo(4, 1);
+  expect(await page.evaluate(() => (window as any).hiddenDuringSeek)).toBe(false);
+  await page.getByRole('button', { name: '选取当前原片', exact: true }).click();
+  await expect(page.getByLabel('开始时间', { exact: true })).toHaveValue('00:00:00.000');
+  await expect(page.getByLabel('结束时间', { exact: true })).toHaveValue('00:00:06.000');
+  await page.getByRole('button', { name: '跳到原片结尾', exact: true }).click();
+  await expect(video).toHaveAttribute('data-asset-id', 'shared');
+  await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.currentTime)).toBeGreaterThan(5.9);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test('chapter edit persists relative times, jumps and exports a single video chapter table', async ({ page }) => {
+  await immediateSaves(page);
+  await page.locator('.match-item').getByRole('button', { name: '章节', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '原名称 · 章节' });
+  await dialog.getByRole('button', { name: '在播放位置添加章节' }).click();
+  await expect(dialog.getByLabel('章节1名称')).toHaveValue('第1小局');
+  await dialog.getByLabel('章节1名称').fill('第一小局');
+  await expect.poll(() => page.evaluate(() => (window as any).sessions[0].matches[0].chapters?.[0]?.title)).toBe('第一小局');
+  await dialog.getByRole('button', { name: '跳到章节1' }).click();
+  await expect.poll(() => page.locator('video').evaluate((v: HTMLVideoElement) => v.currentTime)).toBeCloseTo(0, 1);
+  await expect(dialog.getByLabel('章节时间表')).toHaveValue('00:00:00 第一小局');
+  const downloadPromise = page.waitForEvent('download');
+  await dialog.getByRole('button', { name: '导出章节时间表' }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe('原名称-章节.txt');
+  expect(readFileSync((await download.path())!, 'utf8')).toBe('00:00:00 第一小局');
+  await page.screenshot({ path: '/tmp/rallycut-chapters.png' });
+});
+
+test('quick share overlaps a marked match without changing it, with explicit cross-file confirmation', async ({ page }) => {
+  await immediateSaves(page);
+  await page.getByRole('button', { name: '从此处截取 10 秒', exact: true }).click();
+  await expect(page.getByLabel('分享开始', { exact: true })).toHaveValue('00:00:00.000');
+  await expect(page.getByLabel('分享结束', { exact: true })).toHaveValue('00:00:10.000');
+  await expect(page.getByText('预计约 7.7 MB')).toBeVisible();
+  await page.getByRole('button', { name: '加入导出队列', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '确认跨文件合并' });
+  await expect(dialog).toBeVisible();
+  expect(await page.evaluate(() => (window as any).enqueued.filter((v: any) => !v.dryRun).length)).toBe(0);
+  await dialog.getByRole('button', { name: '仍然合并并继续', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).enqueued.filter((v: any) => !v.dryRun).length)).toBe(1);
+  const sent = await page.evaluate(() => (window as any).enqueued.find((v: any) => !v.dryRun));
+  expect(sent.clip).toEqual({ start_us: 0, end_us: 10e6 });
+  expect(sent.preset).toMatchObject({ codec: 'h264', width: 1920, height: 1080, force_60: true, bitrate_kbps: 6000 });
+  expect(await page.evaluate(() => (window as any).sessions[0].matches)).toHaveLength(1);
+});
+
+test('short-clip focus keeps controls visible at laptop and tablet widths', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', e => errors.push(e.message));
+  await page.getByRole('button', { name: '精调 15 秒', exact: true }).click();
+  await expect(page.getByText('片段精调', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '查看全片', exact: true })).toBeVisible();
+  await page.screenshot({ path: '/tmp/rallycut-editor.png' });
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await expect(page.getByRole('button', { name: '原片开头', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '从此处截取 10 秒', exact: true })).toBeVisible();
+  await page.screenshot({ path: '/tmp/rallycut-tablet.png' });
+  await page.getByRole('button', { name: '查看全片', exact: true }).click();
+  await expect(page.getByText('统一时间线', { exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});

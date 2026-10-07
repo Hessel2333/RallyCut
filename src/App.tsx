@@ -63,6 +63,9 @@ import {
 import { useMediaSeek } from "./mediaSeek";
 import { SessionSaves } from "./sessionSaves";
 import { PublicationPanel } from "./PublicationPanel";
+import { ChapterEditor } from "./ChapterEditor";
+import { ContinuityPanel, useContinuity } from "./ContinuityPanel";
+import { sharePreset, sourceBounds, focusWindow, resizedMatch, crossingPairs } from "./editing";
 import { UpdateCenter } from "./UpdateCenter";
 
 const defaultPreset: Preset = {
@@ -262,6 +265,13 @@ export default function App() {
   const [markIn, setMarkIn] = useState(0);
   const [markOut, setMarkOut] = useState(0);
   const [zoom, setZoom] = useState(1);
+  const [focusRange, setFocusRange] = useState<{ start: number; end: number } | null>(null);
+  const [shareClip, setShareClip] = useState<{ start_us: number; end_us: number } | null>(null);
+  const [chapterId, setChapterId] = useState<string | null>(null);
+  const [continuityOpen, setContinuityOpen] = useState(false);
+  const [mergeAction, setMergeAction] = useState<{ pairs: string[]; action: () => void } | null>(null);
+  const timelineScroll = useRef<HTMLDivElement>(null);
+  useEffect(() => { setFocusRange(null); setZoom(1); setChapterId(null); setContinuityOpen(false); setMergeAction(null); }, [sessionId]);
   const [selected, setSelected] = useState<string[]>([]);
   const [preset, setPreset] = useState(defaultPreset);
   const [hardware, setHardware] = useState<string[]>([]);
@@ -346,11 +356,34 @@ export default function App() {
     .filter(Boolean) ?? []) as Asset[];
   const total = totalUs(assets);
   const current = assets[sourceIndex];
+  const { reviews, retry: retryContinuity } = useContinuity(sessionId, assets);
+  const timelineStart = focusRange?.start ?? 0;
+  const timelineEnd = focusRange?.end ?? total;
+  const timelineDuration = Math.max(1, timelineEnd - timelineStart);
+  const timelineLeft = (time: number) => `${((time - timelineStart) / timelineDuration) * 100}%`;
+  const clipped = (start: number, end: number) => ({
+    left: timelineLeft(Math.max(timelineStart, start)),
+    width: `${((Math.min(end, timelineEnd) - Math.max(start, timelineStart)) / timelineDuration) * 100}%`,
+  });
+  const visibleRange = (start: number, end: number) => end > timelineStart && start < timelineEnd;
+  const focusClip = (start: number, end: number) => {
+    setFocusRange(focusWindow(total, start, end)); setZoom(1);
+    if (timelineScroll.current) timelineScroll.current.scrollLeft = 0;
+  };
+  const confirmMerge = (action: () => void) => {
+    let matches = (session?.matches ?? []).filter(m => selected.includes(m.id));
+    if (shareClip && modal === "export") {
+      try { matches = [{ id: "share", name: "精彩片段", note: "", ranges: mapRange(assets, shareClip.start_us, shareClip.end_us) }]; }
+      catch (e) { setError(String(e)); return; }
+    }
+    const pairs = crossingPairs(matches);
+    if (pairs.length) setMergeAction({ pairs, action }); else action();
+  };
   const offset = assets
     .slice(0, sourceIndex)
     .reduce((n, a) => n + a.duration_us, 0);
   const mediaPath = (asset: Asset) => previews.find(p => p.asset_id === asset.id && p.kind === "proxy")?.path ?? asset.path;
-  const { pending, switchingSource, seekError, beginSeek, validMedia, failSeek, finishSeek } = useMediaSeek(video, sessionId, current, mediaPath, setPlaying, setError);
+  const { pending, switchingSource, seeking, showSeekStatus, seekError, beginSeek, validMedia, failSeek, finishSeek } = useMediaSeek(video, sessionId, current, mediaPath, setPlaying, setError);
   const refresh = async (full = true) => {
     const checkpoint = saves.checkpoint();
     const startedAt = queueSequence.current;
@@ -502,7 +535,8 @@ export default function App() {
     const t = Math.max(0, Math.min(total, Math.round(us)));
     const loc = locate(assets, t);
     setPlayhead(t);
-    beginSeek(loc.local, auto && t < total, assets[loc.index]);
+    const local = Math.min(loc.local, Math.max(0, assets[loc.index].duration_us - 1000));
+    beginSeek(local, auto && t < total, assets[loc.index]);
     if (
       video.current && validMedia(video.current) &&
       video.current &&
@@ -510,7 +544,7 @@ export default function App() {
     ) {
       try {
         video.current.dataset.seekRequest = String(pending.current?.id);
-        video.current.currentTime = loc.local / 1e6;
+        video.current.currentTime = local / 1e6;
         finishSeek(video.current);
       } catch { failSeek("无法定位，请检查素材或生成预览代理。"); }
     } else {
@@ -688,7 +722,7 @@ export default function App() {
       }
     });
   useEffect(() => {
-    if (modal === "export" && session && selected.length)
+    if (modal === "export" && session && (selected.length || shareClip))
       void saves.flush()
         .then(() =>
           invoke<string[]>("enqueue", {
@@ -696,6 +730,7 @@ export default function App() {
             matchIds: selected,
             preset,
             dryRun: true,
+            clip: shareClip,
           }),
         )
         .then(setOutputPreview)
@@ -704,6 +739,7 @@ export default function App() {
   }, [
     modal,
     selected,
+    shareClip,
     preset,
     session,
     data?.settings.output,
@@ -756,6 +792,7 @@ export default function App() {
   const cancelTransition = () => { deferredTransition.current = null; setClosePrompt(null); };
   const openModal = (kind: "import" | "settings" | "export") => transition(() => {
     if (kind === "settings") setConfig(data?.settings);
+    setShareClip(null);
     setModal(kind);
   });
   const requestClose = (
@@ -912,6 +949,7 @@ export default function App() {
         sessionId: session.id,
         matchIds: selected,
         preset,
+        clip: shareClip,
       });
       await refresh(false);
       setQueue(true);
@@ -929,7 +967,7 @@ export default function App() {
       );
       const ranges = mapRange(assets, start, end);
       saveMatches(
-        session!.matches.map((x) => (x.id === m.id ? { ...x, ranges } : x)),
+        session!.matches.map((x) => (x.id === m.id ? resizedMatch(assets, x, ranges) : x)),
       );
       setError("");
     } catch (e) {
@@ -979,7 +1017,7 @@ export default function App() {
     setEditingId(m.id);
     handle.setPointerCapture(e.pointerId);
     const move = (event: PointerEvent) => {
-      const t = Math.round(((event.clientX - rect.left) / rect.width) * total);
+      const t = Math.round(timelineStart + ((event.clientX - rect.left) / rect.width) * timelineDuration);
       next =
         side === "start"
           ? {
@@ -1114,10 +1152,15 @@ export default function App() {
     el.setPointerCapture(e.pointerId);
     const rect = el.closest(".timeline")!.getBoundingClientRect();
     const auto = playing;
-    const move = (ev: PointerEvent) =>
-      seek(((ev.clientX - rect.left) / rect.width) * total, auto);
-    seek(((e.clientX - rect.left) / rect.width) * total, auto);
+    let frame = 0;
+    let target = timelineStart + ((e.clientX - rect.left) / rect.width) * timelineDuration;
+    const move = (ev: PointerEvent) => {
+      target = timelineStart + ((ev.clientX - rect.left) / rect.width) * timelineDuration;
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; seek(target, auto); });
+    };
+    seek(target, auto);
     const end = () => {
+      if (frame) { cancelAnimationFrame(frame); seek(target, auto); }
       el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", end);
       el.removeEventListener("pointercancel", end);
@@ -1154,7 +1197,7 @@ export default function App() {
         <button onClick={() => openModal("export")} title="查看和保存导出设置">
           导出设置
         </button>
-        <button onClick={() => transition(() => { setQueue(false); setPublicationOpen(true); })}>B 站发布</button>
+        <button onClick={() => transition(() => { confirmMerge(() => { setQueue(false); setPublicationOpen(true); }); })}>B 站发布</button>
         <UpdateCenter
           blocked={
             busy || !!previewTask || detecting || activeJobs > 0 || !!modal || publicationActive || publicationOpen
@@ -1385,8 +1428,8 @@ export default function App() {
             }}
           >
             {seekError && <div className="seek-status" role="alert">{seekError}<button onClick={() => { seek(playhead, false); video.current?.load(); }}>重试定位</button></div>}
-            {switchingSource && current?.available && (
-              <span className="seek-status" role="status">
+            {showSeekStatus && current?.available && (
+              <span className="seek-status seeking" role="status">
                 正在定位…
               </span>
             )}
@@ -1400,6 +1443,8 @@ export default function App() {
                     )?.path ?? current.path)
                   }
                   style={{ visibility: switchingSource || seekError ? "hidden" : "visible" }}
+                  preload="auto"
+                  playsInline
                   ref={video}
                   data-asset-id={current.id}
                   data-session-id={sessionId}
@@ -1496,6 +1541,7 @@ export default function App() {
               <span> / {timecode(total)}</span>
             </span>
             <div className="play-controls">
+              <button title="上一帧（D）" disabled={!current} onClick={() => stepFrame(-1)}>‹ 帧</button>
               <button
                 title={`后退 ${stepSeconds} 秒`}
                 disabled={!current}
@@ -1519,7 +1565,8 @@ export default function App() {
                 <SkipForward size={17} />
               </button>
             </div>
-            <button disabled={!current?.available || switchingSource || !!seekError || coverBusy}
+            <button title="下一帧（F）" disabled={!current} onClick={() => stepFrame(1)}>帧 ›</button>
+            <button disabled={!current?.available || seeking || !!seekError || coverBusy}
               onClick={() => {
                 const media = video.current;
                 if (!current || !media || media.readyState < 2) return;
@@ -1543,10 +1590,11 @@ export default function App() {
           </div>
           <section className="timeline-panel">
             <div className="timeline-toolbar">
-              <strong>统一时间线</strong>
-              <span className="muted">
-                {assets.length > 1 ? "文件交界不代表连续拍摄，请检查衔接" : ""}
-              </span>
+              <strong>{focusRange ? "片段精调" : "统一时间线"}</strong>
+              {assets.length > 1 && <button onClick={() => setContinuityOpen(true)}>检查衔接 · {Object.keys(reviews).length}/{assets.length - 1}</button>}
+              <button disabled={!total} onClick={() => focusClip(shownEnd > shownStart ? shownStart : playhead, shownEnd > shownStart ? shownEnd : playhead + 10e6)}>放大选区</button>
+              <button disabled={!total} onClick={() => focusClip(playhead - 5e6, playhead + 5e6)}>精调 15 秒</button>
+              {focusRange && <button onClick={() => { setFocusRange(null); setZoom(1); }}>查看全片</button>}
               <label>
                 缩放{" "}
                 <input
@@ -1560,7 +1608,7 @@ export default function App() {
                 />
               </label>
             </div>
-            <div className="timeline-scroll">
+            <div className="timeline-scroll" ref={timelineScroll}>
               <div
                 className="timeline"
                 style={{ width: `${zoom * 100}%` }}
@@ -1570,13 +1618,15 @@ export default function App() {
                 <div className="ruler">
                   {Array.from({ length: 9 }, (_, i) => (
                     <span key={i}>
-                      {timecode(Math.floor((total * i) / 8)).slice(0, 8)}
+                      {timecode(Math.floor(timelineStart + (timelineDuration * i) / 8)).slice(0, focusRange ? 12 : 8)}
                     </span>
                   ))}
                 </div>
                 <div className="source-track">
-                  {assets.map((a, i) => (
-                    <div
+                  {assets.map((a, i) => {
+                    const start = totalUs(assets.slice(0, i)), end = start + a.duration_us;
+                    if (!visibleRange(start, end)) return null;
+                    return <div
                       key={a.id}
                       tabIndex={0}
                       onFocus={() =>
@@ -1585,7 +1635,8 @@ export default function App() {
                       onPointerDown={() =>
                         setDeleteTarget({ kind: "asset", id: a.id })
                       }
-                      style={{ width: `${(a.duration_us / total) * 100}%` }}
+                      style={{ ...clipped(start, end), position: "absolute", height: "100%" }}
+                      onDoubleClick={(e) => { e.stopPropagation(); chooseGap(start, end); focusClip(start, end); }}
                       className={i === sourceIndex ? "current" : ""}
                     >
                       {previews.find(
@@ -1604,20 +1655,17 @@ export default function App() {
                         <Film size={13} />
                       )}
                       <span>{a.name}</span>
-                    </div>
-                  ))}
+                    </div>;
+                  })}
                 </div>
                 <div className="match-track">
-                  {timelineGaps(assets, session?.matches ?? []).map((g) => (
+                  {timelineGaps(assets, session?.matches ?? []).filter(g => visibleRange(g.start, g.end)).map((g) => (
                     <button
                       key={g.start}
                       className="gap-block"
                       title="选择空档，添加一局"
                       aria-label={`选择空档 ${timecode(g.start)}—${timecode(g.end)}`}
-                      style={{
-                        left: `${(g.start / total) * 100}%`,
-                        width: `${((g.end - g.start) / total) * 100}%`,
-                      }}
+                      style={clipped(g.start, g.end)}
                       onPointerDown={(e) => e.stopPropagation()}
                       onClick={() => chooseGap(g.start, g.end)}
                     >
@@ -1629,9 +1677,11 @@ export default function App() {
                       dragPreview?.id === m.id
                         ? dragPreview
                         : bounds(assets, m.ranges);
+                    if (!visibleRange(b.start, b.end)) return null;
                     return (
                       <div
-                        title={m.name}
+                        title={`${m.name} · 双击放大选区`}
+                        onDoubleClick={() => focusClip(b.start, b.end)}
                         key={m.id}
                         className={`match-block ${editingId === m.id ? "editing" : ""}`}
                         tabIndex={0}
@@ -1643,19 +1693,18 @@ export default function App() {
                           setEditingId(m.id);
                           setDeleteTarget({ kind: "match", id: m.id });
                         }}
-                        style={{
-                          left: `${(b.start / total) * 100}%`,
-                          width: `${((b.end - b.start) / total) * 100}%`,
-                        }}
+                        style={clipped(b.start, b.end)}
                       >
                         <button
                           className="segment-handle start"
+                          style={{ visibility: b.start < timelineStart ? "hidden" : "visible" }}
                           aria-label={`调整${m.name}开始`}
                           onClick={(e) => e.stopPropagation()}
                           onPointerDown={(e) => dragBoundary(e, m, "start")}
                         />
                         <button
                           className="segment-handle end"
+                          style={{ visibility: b.end > timelineEnd ? "hidden" : "visible" }}
                           aria-label={`调整${m.name}结束`}
                           onClick={(e) => e.stopPropagation()}
                           onPointerDown={(e) => dragBoundary(e, m, "end")}
@@ -1671,22 +1720,20 @@ export default function App() {
                   <>
                     <div
                       className="playhead"
-                      style={{ left: `${(playhead / total) * 100}%` }}
+                      style={{ left: timelineLeft(playhead), display: playhead < timelineStart || playhead > timelineEnd ? "none" : undefined }}
                     />
                     <div
                       className="draft-range"
-                      style={{
-                        left: `${(shownStart / total) * 100}%`,
-                        width: `${(Math.max(0, shownEnd - shownStart) / total) * 100}%`,
-                      }}
+                      style={visibleRange(shownStart, shownEnd) ? clipped(shownStart, shownEnd) : { display: "none" }}
                     />
                     <input
                       className="boundary start"
+                      style={{ visibility: shownStart < timelineStart || shownStart > timelineEnd ? "hidden" : "visible" }}
                       title="拖动开始边界"
                       aria-label="拖动开始边界"
                       type="range"
-                      min="0"
-                      max={total}
+                      min={timelineStart}
+                      max={timelineEnd}
                       step="1000"
                       value={shownStart}
                       onPointerDown={(e) => e.stopPropagation()}
@@ -1694,11 +1741,12 @@ export default function App() {
                     />
                     <input
                       className="boundary end"
+                      style={{ visibility: shownEnd < timelineStart || shownEnd > timelineEnd ? "hidden" : "visible" }}
                       title="拖动结束边界"
                       aria-label="拖动结束边界"
                       type="range"
-                      min="0"
-                      max={total}
+                      min={timelineStart}
+                      max={timelineEnd}
                       step="1000"
                       value={shownEnd}
                       onPointerDown={(e) => e.stopPropagation()}
@@ -1728,6 +1776,7 @@ export default function App() {
               <button disabled={!current} onClick={() => changeStart(playhead)}>
                 设为开始 <kbd>I</kbd>
               </button>
+              <button disabled={!current} title="开始对齐所选区间首个原片的开头" onClick={() => changeStart(sourceBounds(assets, shownStart).start)}>原片开头</button>
               <ClockInput
                 label="开始时间"
                 value={shownStart}
@@ -1736,6 +1785,7 @@ export default function App() {
               <button disabled={!current} onClick={() => changeEnd(playhead)}>
                 设为结束 <kbd>O</kbd>
               </button>
+              <button disabled={!current} title="结束对齐所选区间最后一个原片的结尾" onClick={() => changeEnd(sourceBounds(assets, shownEnd > shownStart ? shownEnd : playhead, shownEnd > shownStart).end)}>原片结尾</button>
               <ClockInput
                 label="结束时间"
                 value={shownEnd}
@@ -1749,6 +1799,23 @@ export default function App() {
                 <Plus size={15} />
                 添加一局
               </button>
+            </div>
+            <div className="editing-actions source-actions">
+              <button disabled={!current} onClick={() => {
+                if (editingMatch) updateBoundary(editingMatch, offset, offset + current.duration_us);
+                else { setMarkIn(offset); setMarkOut(offset + current.duration_us); }
+              }}>选取当前原片</button>
+              <button disabled={!current} onClick={() => seek(offset, false)}>跳到原片开头</button>
+              <button disabled={!current} onClick={() => seek(offset + current.duration_us - 1000, false)}>跳到原片结尾</button>
+              <button disabled={!session || shownEnd <= shownStart} onClick={() => transition(() => {
+                setPreset({ ...sharePreset }); setPresetId(""); setPresetName("");
+                setShareClip({ start_us: shownStart, end_us: shownEnd }); setModal("export");
+              })}>分享选区 · 1080p</button>
+              <button disabled={!current || playhead >= total} onClick={() => transition(() => {
+                setPreset({ ...sharePreset }); setPresetId(""); setPresetName("");
+                setShareClip({ start_us: playhead, end_us: Math.min(total, playhead + 10e6) }); setModal("export");
+              })}>从此处截取 10 秒</button>
+              {shownEnd > shownStart && <small>选区 {((shownEnd - shownStart) / 1e6).toFixed(2)} 秒</small>}
             </div>
             <div className="tag-toolbar">
               <button
@@ -1917,6 +1984,14 @@ export default function App() {
                       </span>
                       <span>{timecode(b.end - b.start).slice(3, 8)}</span>
                     </div>
+                    <div className="editing-actions">
+                      <button onClick={() => { setEditingId(m.id); focusClip(b.start, b.end); }}>精调</button>
+                      <button onClick={() => setChapterId(m.id)}>章节{m.chapters?.length ? ` · ${m.chapters.length}` : ""}</button>
+                      {m.ranges.length > 1 && <button onClick={() => setContinuityOpen(true)}>跨 {m.ranges.length} 个原片</button>}
+                    </div>
+                    {!!m.chapters?.length && <div className="chapter-jumps" aria-label={`${m.name}章节跳转`}>
+                      {m.chapters.map((c, index) => <button key={index} title={c.title} onClick={() => { setEditingId(m.id); seek(b.start + c.offset_us, false); }}>{timecode(c.offset_us).slice(3, 8)} {c.title}</button>)}
+                    </div>}
                     <details className="segment-extra">
                       <summary>备注与精确时间</summary>
                       <div className="match-times">
@@ -2108,7 +2183,7 @@ export default function App() {
                       <small title={j.output}>{j.output}</small>
                       {j.error && <pre>{j.error}</pre>}
                       {j.validation && <small>{j.validation}</small>}
-                      {!jobMatchesCurrent(
+                      {!j.segment.id.startsWith("clip-") && !jobMatchesCurrent(
                         j,
                         data.sessions,
                         data.assets,
@@ -2335,6 +2410,12 @@ export default function App() {
           </div>
         </LocalDialog>
       )}
+      {(continuityOpen || mergeAction) && <ContinuityPanel assets={assets} reviews={reviews} retry={retryContinuity} seek={us => seek(us, false)} close={() => { setContinuityOpen(false); setMergeAction(null); }} pairs={mergeAction?.pairs} proceed={mergeAction ? () => { const action = mergeAction.action; setMergeAction(null); action(); } : undefined} />}
+      {chapterId && session?.matches.some(m => m.id === chapterId) && (() => {
+        const m = session.matches.find(m => m.id === chapterId)!;
+        const b = bounds(assets, m.ranges);
+        return <ChapterEditor match={m} duration={b.end - b.start} position={playhead - b.start} close={() => setChapterId(null)} seek={us => seek(b.start + us, false)} change={chapters => saveMatches(session.matches.map(x => x.id === m.id ? { ...x, chapters } : x))} />;
+      })()}
       <PublicationPanel open={publicationOpen} close={() => setPublicationOpen(false)} sessionId={sessionId} selected={selected} preset={preset} beforeCreate={() => saves.flush()} guardRef={publicationGuard} activeChanged={setPublicationActive} />
       {exitError !== null && <LocalDialog title="标记尚未保存" close={() => setExitError(null)}>
         <p role="alert">{exitError}</p>
@@ -2696,11 +2777,19 @@ export default function App() {
             {modal === "export" && (
               <>
                 <p className="muted">
-                  {selected.length
+                  {shareClip ? "导出独立分享片段，保留原有比赛标记。" : selected.length
                     ? `已选 ${selected.length} 个片段，每段保存为一个 MP4 文件`
                     : "设置常用的导出画质与保存位置"}
                 </p>
+                {shareClip && <div className="share-clip-range">
+                  <ClockInput label="分享开始" value={shareClip.start_us} onChange={start_us => setShareClip({ ...shareClip, start_us })} />
+                  <ClockInput label="分享结束" value={shareClip.end_us} onChange={end_us => setShareClip({ ...shareClip, end_us })} />
+                  <span>预计约 {Math.max(0, (shareClip.end_us - shareClip.start_us) / 1e6 * (preset.bitrate_kbps + preset.audio_kbps) / 8000).toFixed(1)} MB</span>
+                </div>}
                 <h3 className="export-heading">导出预设</h3>
+                <div className="editing-actions">
+                  <button onClick={() => { setPreset({ ...sharePreset }); setPresetId(""); setPresetName(""); }}>微信分享 · 1080p / 60 fps / 6 Mbps</button>
+                </div>
                 <div className="preset-row">
                   <label>
                     快捷预设
@@ -3002,7 +3091,7 @@ export default function App() {
                 </div>
                 <div className="modal-actions">
                   <span className="muted">
-                    {selected.length
+                    {shareClip ? "1 个分享片段" : selected.length
                       ? `${selected.length} 个片段`
                       : "尚未选择片段"}
                   </span>
@@ -3018,8 +3107,8 @@ export default function App() {
                   </button>
                   <button
                     className="primary"
-                    disabled={!selected.length}
-                    onClick={exportSelected}
+                    disabled={!selected.length && !shareClip}
+                    onClick={() => confirmMerge(exportSelected)}
                   >
                     <Download size={16} />
                     加入导出队列

@@ -35,6 +35,8 @@ export function useMediaSeek(
   const [seekVersion, setSeekVersion] = useState(0);
   const [seekError, setSeekError] = useState("");
   const [switchingSource, setSwitchingSource] = useState(false);
+  const [seeking, setSeeking] = useState(false);
+  const [showSeekStatus, setShowSeekStatus] = useState(false);
   const beginSeek = (
     local: number,
     play: boolean,
@@ -44,6 +46,8 @@ export function useMediaSeek(
     if (!asset) {
       pending.current = null;
       setSwitchingSource(false);
+      setSeeking(false);
+      setShowSeekStatus(false);
       return;
     }
     pending.current = {
@@ -56,7 +60,17 @@ export function useMediaSeek(
     };
     setSeekVersion(requestId.current);
     setSeekError("");
-    setSwitchingSource(true);
+    setSeeking(true);
+    const v = video.current;
+    setSwitchingSource(
+      !v ||
+        !matchesMedia(
+          pending.current,
+          v.dataset.sessionId || "",
+          v.dataset.assetId || "",
+          v.dataset.path || "",
+        ),
+    );
   };
   const validMedia = (v: HTMLVideoElement) =>
     v === video.current &&
@@ -71,17 +85,25 @@ export function useMediaSeek(
     pending.current = null;
     video.current?.pause();
     setSwitchingSource(false);
+    setSeeking(false);
+    setShowSeekStatus(false);
     setPlaying(false);
     setSeekError(message);
   };
   useEffect(() => {
     const request = pending.current;
     if (!request) return;
+    const statusTimer = window.setTimeout(() => {
+      if (pending.current === request) setShowSeekStatus(true);
+    }, 250);
     const timer = window.setTimeout(() => {
       if (pending.current === request)
         failSeek("定位未完成，请重试或生成预览代理。");
     }, 15000);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      window.clearTimeout(statusTimer);
+    };
   }, [seekVersion]);
   const finishSeek = (v: HTMLVideoElement) => {
     const target = pending.current;
@@ -96,6 +118,8 @@ export function useMediaSeek(
       return;
     pending.current = null;
     setSwitchingSource(false);
+    setSeeking(false);
+    setShowSeekStatus(false);
     if (target.play) void v.play().catch((e) => setError(String(e)));
     else {
       v.pause();
@@ -106,6 +130,8 @@ export function useMediaSeek(
   return {
     pending,
     switchingSource,
+    seeking,
+    showSeekStatus,
     seekError,
     beginSeek,
     validMedia,

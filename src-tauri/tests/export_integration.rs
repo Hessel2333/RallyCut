@@ -235,6 +235,7 @@ fn job(assets: Vec<Asset>, output: &Path, start: i64, end: i64) -> Job {
         name: "跨文件测试".into(),
         ranges: map_range(&assets, start, end).unwrap(),
         note: "".into(),
+        chapters: vec![],
     };
     let preset = Preset {
         width: 320,

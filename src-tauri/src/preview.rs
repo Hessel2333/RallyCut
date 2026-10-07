@@ -31,7 +31,7 @@ pub fn generate(
         return Err("暂不支持 HDR 代理，请使用原片预览".into());
     }
     let ext = if kind == "proxy" { "mp4" } else { "jpg" };
-    let path = cache.join(format!("{}-{}-{kind}-v1.{ext}", asset.id, asset.sha256));
+    let path = cache.join(format!("{}-{}-{kind}-v2.{ext}", asset.id, asset.sha256));
     let partial = cache.join(format!("{}.partial.{ext}", id()));
     let result = (|| {
         if !path.is_file() {
@@ -39,7 +39,7 @@ pub fn generate(
                 .map(str::to_string)
                 .to_vec();
             if kind == "proxy" {
-                args.extend(["-map","0:v:0","-map","0:a:0?","-vf","scale=960:540:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,format=yuv420p","-c:v","libx264","-preset","veryfast","-crf","26","-c:a","aac","-b:a","96k","-movflags","+faststart","-progress","pipe:1"].map(str::to_string));
+                args.extend(["-map","0:v:0","-map","0:a:0?","-vf","scale=960:540:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,format=yuv420p","-c:v","libx264","-preset","veryfast","-crf","26","-g","12","-keyint_min","12","-sc_threshold","0","-bf","0","-c:a","aac","-b:a","96k","-movflags","+faststart","-progress","pipe:1"].map(str::to_string));
             } else {
                 args.extend(
                     [

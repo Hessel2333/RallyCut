@@ -11,7 +11,14 @@ export type Asset = {
   metadata: { streams: Record<string, any>[]; format: Record<string, any> };
   available: boolean;
 };
-export type Match = { id: string; name: string; ranges: Range[]; note: string };
+export type Chapter = { title: string; offset_us: number };
+export type Match = {
+  id: string;
+  name: string;
+  ranges: Range[];
+  note: string;
+  chapters?: Chapter[];
+};
 export type Session = {
   id: string;
   name: string;

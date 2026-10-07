@@ -25,11 +25,18 @@ pub struct Range {
     pub end_us: i64,
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct Chapter {
+    pub title: String,
+    pub offset_us: i64,
+}
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Match {
     pub id: String,
     pub name: String,
     pub ranges: Vec<Range>,
     pub note: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chapters: Vec<Chapter>,
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Session {
@@ -318,6 +325,19 @@ pub fn validate_session_change(old: &Session, new: &Session, assets: &[Asset]) -
     }
     for m in &new.matches {
         validate_ranges(&m.ranges, &ordered)?;
+        let duration: i64 = m.ranges.iter().map(|r| r.end_us - r.start_us).sum();
+        let mut previous = -1;
+        for c in &m.chapters {
+            if c.offset_us < 0
+                || c.offset_us >= duration
+                || c.offset_us <= previous
+                || c.title.trim().is_empty()
+                || c.title.chars().count() > 80
+            {
+                return Err("章节需按时间排序，名称为 1–80 字，且位于比赛内".into());
+            }
+            previous = c.offset_us;
+        }
         let first = m.ranges.first().unwrap();
         let last = m.ranges.last().unwrap();
         let start = offsets[&first.asset_id] + first.start_us;
@@ -452,6 +472,7 @@ mod tests {
                 name: "m".into(),
                 ranges: map_range(&a, 12_000_000, 18_000_000).unwrap(),
                 note: "".into(),
+                chapters: vec![],
             }],
         };
         let mut changed = original.clone();
