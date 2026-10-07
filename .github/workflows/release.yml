@@ -1,4 +1,4 @@
-name: Release Windows app
+name: Release desktop app
 on:
   push:
     tags: ["v*"]
@@ -11,6 +11,8 @@ concurrency:
 jobs:
   windows:
     runs-on: windows-latest
+    outputs:
+      release_id: ${{ steps.tauri.outputs.releaseId }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -58,8 +60,58 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
         run: node scripts/finalize-update.mjs
-      - name: Publish complete release
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: npm ci
+      - run: node scripts/check-release.mjs
+      - run: npm test
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Build Apple Silicon app and DMG
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: npm run tauri build -- --target aarch64-apple-darwin --bundles app,dmg -- --locked
+      - name: Verify and archive app
+        run: |
+          APP=src-tauri/target/aarch64-apple-darwin/release/bundle/macos/RallyCut.app
+          /usr/bin/codesign --verify --deep --strict "$APP"
+          /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist"
+          mkdir -p release-artifacts
+          VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).version')
+          tar -czf "release-artifacts/RallyCut_${VERSION}_aarch64.app.tar.gz" -C "$(dirname "$APP")" RallyCut.app
+          cp src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg release-artifacts/
+          cd release-artifacts
+          shasum -a 256 *.dmg *.tar.gz > SHA256SUMS-macos.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-apple-silicon
+          path: release-artifacts/*
+          if-no-files-found: error
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-apple-silicon
+          path: release-artifacts
+      - name: Upload macOS downloads and publish complete release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
-        run: gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID" -F draft=false
+          RELEASE_ID: ${{ needs.windows.outputs.release_id }}
+        run: |
+          TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq .tag_name)
+          gh release upload "$TAG" release-artifacts/* --clobber
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false
