@@ -159,9 +159,10 @@ pub fn identity_signature(path: &Path, expected: &str, cancel: &AtomicBool) -> R
         hash_file(path, cancel, |_| {})
     }
 }
-pub fn verified_copy(
+pub fn copy_to_library(
     src: &Path,
     dir: &Path,
+    verify: bool,
     cancel: &AtomicBool,
     mut progress: impl FnMut(&str, u64),
 ) -> Result<(PathBuf, String)> {
@@ -174,6 +175,7 @@ pub fn verified_copy(
     ));
     let result = (|| {
         let mut input = File::open(src).map_err(|e| e.to_string())?;
+        let before = input.metadata().map_err(|e| e.to_string())?;
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -199,12 +201,28 @@ pub fn verified_copy(
             done += n as u64;
             progress("copying", done);
         }
+        let after = input.metadata().map_err(|e| e.to_string())?;
+        if done != before.len()
+            || after.len() != before.len()
+            || after.modified().ok() != before.modified().ok()
+        {
+            return Err("复制期间源文件发生改变，请重试".into());
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err("已取消".into());
+        }
+        progress("flushing", done);
         output.sync_all().map_err(|e| e.to_string())?;
         drop(output);
         let source = format!("{:x}", hash.finalize());
-        let dest = hash_file(&partial, cancel, |n| progress("verifying", n))?;
-        if source != dest {
-            return Err("复制校验不一致，请重试".into());
+        if verify {
+            let dest = hash_file(&partial, cancel, |n| progress("verifying", n))?;
+            if source != dest {
+                return Err("复制校验不一致，请重试".into());
+            }
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err("已取消".into());
         }
         commit_no_replace(&partial, &target)?;
         Ok((target, source))
@@ -392,16 +410,57 @@ mod tests {
         let src = d.path().join("中文 空格 ' 文件.mp4");
         fs::write(&src, b"abc").unwrap();
         let c = AtomicBool::new(false);
-        let (p, h) = verified_copy(&src, &d.path().join("lib"), &c, |_, _| {}).unwrap();
+        let (p, h) = copy_to_library(&src, &d.path().join("lib"), true, &c, |_, _| {}).unwrap();
         assert_eq!(hash_file(&p, &c, |_| {}).unwrap(), h);
         fs::write(&src, b"xyz").unwrap();
-        let (p2, h2) = verified_copy(&src, &d.path().join("lib"), &c, |_, _| {}).unwrap();
+        let (p2, h2) = copy_to_library(&src, &d.path().join("lib"), true, &c, |_, _| {}).unwrap();
         assert_ne!(p, p2);
         assert_ne!(h, h2);
         c.store(true, Ordering::Relaxed);
-        assert!(verified_copy(&src, &d.path().join("lib"), &c, |_, _| {}).is_err());
+        assert!(copy_to_library(&src, &d.path().join("lib"), true, &c, |_, _| {}).is_err());
         c.store(false, Ordering::Relaxed);
-        assert!(verified_copy(&src, &d.path().join("lib"), &c, |_, _| {}).is_ok());
+        assert!(copy_to_library(&src, &d.path().join("lib"), true, &c, |_, _| {}).is_ok());
+    }
+    #[test]
+    fn fast_copy_skips_readback_and_preserves_contents() {
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("source.mp4");
+        let bytes = vec![47u8; 2 * 1024 * 1024 + 17];
+        fs::write(&src, &bytes).unwrap();
+        for verify in [false, true] {
+            let mut phases = Vec::new();
+            let (target, digest) = copy_to_library(
+                &src,
+                &d.path().join("lib"),
+                verify,
+                &AtomicBool::new(false),
+                |phase, _| phases.push(phase.to_string()),
+            )
+            .unwrap();
+            assert_eq!(fs::read(&target).unwrap(), bytes);
+            assert_eq!(
+                digest,
+                hash_file(&src, &AtomicBool::new(false), |_| {}).unwrap()
+            );
+            assert_eq!(phases.iter().any(|p| p == "verifying"), verify);
+            assert!(phases.iter().any(|p| p == "flushing"));
+        }
+    }
+    #[test]
+    fn fast_copy_cancellation_cleans_partial_file() {
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("source.mp4");
+        fs::write(&src, vec![9u8; 2 * 1024 * 1024]).unwrap();
+        let cancel = AtomicBool::new(false);
+        let library = d.path().join("lib");
+        assert!(copy_to_library(&src, &library, false, &cancel, |phase, _| {
+            if phase == "copying" {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        })
+        .is_err());
+        assert_eq!(fs::read_dir(library).unwrap().count(), 0);
+        assert!(src.is_file());
     }
     #[test]
     fn natural() {

@@ -2,7 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 const releaseNotes = JSON.parse(readFileSync(new URL("../src/release-notes.json", import.meta.url), "utf8")) as { version: string; notes: string };
 
-async function setup(page: Page, options: { previous?: string; auto?: boolean; result?: string; blocked?: boolean } = {}) {
+async function setup(page: Page, options: { previous?: string; auto?: boolean; result?: string; blocked?: boolean; supported?: boolean } = {}) {
   await page.addInitScript((options) => {
     if (!sessionStorage.getItem("test-initialized")) {
       localStorage.clear();
@@ -19,6 +19,7 @@ async function setup(page: Page, options: { previous?: string; auto?: boolean; r
       transformCallback: () => 1, unregisterCallback: () => {},
       invoke: async (cmd: string, args: any) => {
         w.calls.push(cmd);
+        if (cmd === "supports_app_update") return options.supported ?? true;
         if (cmd === "plugin:app|version") return options.currentVersion;
         if (cmd === "publication_snapshot") return { drafts: [], artifacts: [], uploads: [], publications: [], active: false };
         if (cmd === "snapshot") return { sessions: [], assets: [], jobs: options.blocked ? [{ id: "active", status: "exporting" }] : [], match_numbers: {}, paused: false, data_dir: "", settings: { ffmpeg: "", ffprobe: "", library: "", output: "" } };
@@ -26,6 +27,7 @@ async function setup(page: Page, options: { previous?: string; auto?: boolean; r
         if (cmd === "cached_previews") return [];
         if (cmd === "export_preferences") return { current: { width: 3840, height: 2160, bitrate_kbps: 20000, audio_kbps: 192, force_60: false, encoder: "auto", acknowledge_sdr: false }, presets: [] };
         if (cmd === "plugin:updater|check") {
+          if (w.updateResult === "missing-mac") throw new Error("the platform `darwin-aarch64` was not found in the response `platforms` object");
           if (w.updateResult === "error") throw new Error("offline");
           if (w.updateResult === "latest") return null;
           return { rid: 2, currentVersion: options.currentVersion, version: "99.0.0", body: "改进导出速度\n修复播放问题", rawJson: {} };
@@ -128,6 +130,63 @@ test("failed download never reaches installation", async ({ page }) => {
   await page.getByRole("button", { name: "版本与更新", exact: true }).click();
   await page.getByRole("button", { name: "检查更新", exact: true }).click();
   await page.getByRole("button", { name: "下载更新", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("下载失败");
+  await expect(page.getByRole("alert")).toContainText("更新包校验失败");
   expect(await page.evaluate(() => (window as any).calls.includes("plugin:updater|install"))).toBe(false);
+});
+
+test("manual-update platforms never request automatic updates and open the release page", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await setup(page, { supported: false, auto: true });
+  await page.clock.fastForward(16000);
+  await page.getByRole("button", { name: "版本与更新", exact: true }).click();
+  await expect(
+    page.getByText("当前平台暂不支持自动更新", { exact: false }),
+  ).toBeVisible();
+  await expect(page.getByRole("checkbox")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "检查更新", exact: true }),
+  ).toHaveCount(0);
+  if (process.env.RALLYCUT_QA_SCREENSHOT) await page.screenshot({ path: process.env.RALLYCUT_QA_SCREENSHOT });
+  await page.getByRole("button", { name: "前往官方下载页" }).click();
+  expect(
+    await page.evaluate(() =>
+      (window as any).calls.includes("open_app_releases"),
+    ),
+  ).toBe(true);
+  await page.clock.fastForward(4 * 60 * 60 * 1000);
+  expect(
+    await page.evaluate(() =>
+      (window as any).calls.includes("plugin:updater|check"),
+    ),
+  ).toBe(false);
+});
+
+
+test("Mac missing artifact retains automatic updates and can retry when available", async ({ page }) => {
+  await setup(page, { supported: true, auto: true, result: "missing-mac" });
+  await page.getByRole("button", { name: "版本与更新", exact: true }).click();
+  await expect(page.getByRole("checkbox")).toBeChecked();
+  await page.getByRole("button", { name: "检查更新", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("尚未提供");
+  await expect(page.getByRole("alert")).not.toContainText("网络");
+  await expect(page.getByRole("button", { name: "前往官方下载页" })).toBeVisible();
+  await page.evaluate(() => { (window as any).updateResult = "available"; });
+  await page.getByRole("button", { name: "检查更新", exact: true }).click();
+  await page.getByRole("button", { name: "下载更新", exact: true }).click();
+  await expect(page.getByRole("button", { name: "安装并重新打开" })).toBeEnabled();
+});
+
+
+test("library import defaults to normal copy and offers optional readback", async ({ page }) => {
+  await setup(page);
+  await page.getByRole("button", { name: "导入素材", exact: true }).first().click();
+  await page.getByRole("button", { name: "复制到素材库", exact: true }).click();
+  const verify = page.getByRole("checkbox", { name: "复制后完整校验（更耗时）" });
+  await expect(verify).not.toBeChecked();
+  await verify.check();
+  await expect(verify).toBeChecked();
+  await page.getByRole("button", { name: "就地引用", exact: true }).click();
+  await expect(verify).toHaveCount(0);
 });

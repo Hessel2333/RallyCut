@@ -93,6 +93,7 @@ const phaseName: Record<string, string> = {
   probing: "读取视频信息",
   copying: "复制素材",
   verifying: "读回校验",
+  flushing: "正在完成写入",
 };
 const dateNow = () => new Date().toLocaleDateString("sv-SE");
 function ClockInput({
@@ -279,6 +280,7 @@ export default function App() {
   const [importDir, setImportDir] = useState("");
   const [paths, setPaths] = useState<string[]>([]);
   const [copy, setCopy] = useState(false);
+  const [verifyCopy, setVerifyCopy] = useState(false);
   const [importName, setImportName] = useState("羽毛球");
   const [busy, setBusy] = useState(false);
   const [importDate, setImportDate] = useState(dateNow());
@@ -916,6 +918,7 @@ export default function App() {
         const id = await invoke<string>("import_session", {
           paths,
           copy,
+          verifyCopy,
           name: importName,
           date: captureDate,
           token: importToken.current,
@@ -2551,10 +2554,21 @@ export default function App() {
                 </div>
                 <p className="muted">
                   {copy
-                    ? "复制后读回校验；原文件保持不变。"
+                    ? "复制到素材库，原文件保持不变。"
                     : "直接使用当前位置的文件，请保留素材。"}{" "}
                   按文件名自然排序，请确认拍摄顺序。
                 </p>
+                {copy && (
+                  <label className="update-toggle">
+                    <input
+                      type="checkbox"
+                      checked={verifyCopy}
+                      disabled={busy}
+                      onChange={(e) => setVerifyCopy(e.target.checked)}
+                    />
+                    复制后完整校验（更耗时）
+                  </label>
+                )}
                 <div className="scan-list">
                   {paths.map((p, i) => (
                     <div

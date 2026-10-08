@@ -339,6 +339,7 @@ async fn import_session(
     app: tauri::AppHandle,
     paths: Vec<String>,
     copy: bool,
+    verify_copy: Option<bool>,
     name: String,
     date: String,
     token: String,
@@ -347,14 +348,16 @@ async fn import_session(
  let s=app.state::<AppState>();let c=Arc::new(AtomicBool::new(false));s.cancels.lock().unwrap().insert(token.clone(),c.clone());
  let result=(||{let t=tools(&s);if !t.ffprobe.available{return Err("请在设置中配置 ffprobe".into());}if paths.is_empty(){return Err("请选择至少一个视频".into());}let cfg=settings(&s);let mut asset_ids=vec![];
  for (index,path) in paths.iter().enumerate(){let source=allowed(&s,Path::new(path))?;let size=source.metadata().map_err(error)?.len();let mut last=std::time::Instant::now()-Duration::from_secs(1);let mut notify=|phase:&str,bytes:u64|{if last.elapsed()>Duration::from_millis(120)||bytes==size{let _=app.emit("import-progress",serde_json::json!({"token":token,"phase":phase,"bytes":bytes,"total":size,"index":index+1,"count":paths.len(),"name":source.file_name().unwrap_or_default().to_string_lossy()}));last=std::time::Instant::now();}};
- notify(if copy{"hashing"}else{"probing"},0);
- let hash=if copy{media::hash_file(&source,&c,|n|notify("hashing",n))?}else{media::reference_signature(&source,&c)?};
+ let verify=verify_copy.unwrap_or(false);
+ notify("probing",0);
  let assets=s.db.lock().unwrap().list::<Asset>("asset")?;
- let existing=if copy{media::duplicate(&assets,&hash,true)}else{assets.into_iter().find(|a|a.sha256==hash && Path::new(&a.path)==source)};
- if let Some(a)=existing{if !asset_ids.contains(&a.id){asset_ids.push(a.id);}continue;}
+ let hash=if copy{String::new()}else{media::reference_signature(&source,&c)?};
+ if !copy {if let Some(a)=assets.iter().find(|a|a.sha256==hash && Path::new(&a.path)==source){if !asset_ids.contains(&a.id){asset_ids.push(a.id.clone());}continue;}}
  let metadata=media::probe(&t.ffprobe.path,&source)?;let duration_us=media::duration(&metadata)?;if duration_us<=0{return Err("素材时长无效".into());}
- let (target,digest)=if copy{media::verified_copy(&source,Path::new(&cfg.library),&c,&mut notify)?}else{(source.clone(),hash.clone())};if digest!=hash{return Err("导入期间源文件发生改变，请重试".into());}
- let a=Asset{id:id(),original_path:source.to_string_lossy().into(),path:target.to_string_lossy().into(),name:source.file_name().unwrap_or_default().to_string_lossy().into(),size,sha256:digest,verification:if copy{"verified-copy"}else{"sampled-reference"}.into(),duration_us,metadata,available:true};
+ let (target,digest)=if copy{media::copy_to_library(&source,Path::new(&cfg.library),verify,&c,&mut notify)?}else{(source.clone(),hash)};
+ // Reuse only a verified existing copy; never discard the new file for an unchecked reference.
+ if copy {if let Some(a)=media::duplicate(&assets,&digest,true){std::fs::remove_file(&target).map_err(error)?;if !asset_ids.contains(&a.id){asset_ids.push(a.id);}continue;}}
+ let a=Asset{id:id(),original_path:source.to_string_lossy().into(),path:target.to_string_lossy().into(),name:source.file_name().unwrap_or_default().to_string_lossy().into(),size,sha256:digest,verification:if copy{if verify{"verified-copy"}else{"copied"}}else{"sampled-reference"}.into(),duration_us,metadata,available:true};
  app.asset_protocol_scope().allow_file(&target).map_err(error)?;s.db.lock().unwrap().put("asset",&a.id,&a)?;asset_ids.push(a.id);
  }
  let session=Session{id:id(),name:if name.trim().is_empty(){"羽毛球".into()}else{name},date,asset_ids,matches:vec![]};s.db.lock().unwrap().put("session",&session.id,&session)?;Ok(session.id)
@@ -576,6 +579,25 @@ fn queue_action(s: State<AppState>, action: String, job_id: Option<String>) -> R
         return Err("此任务当前不能执行该操作".into());
     }
     db.put("job", &j.id, &j)
+}
+// Release builds provide updater artifacts for both desktop platforms.
+#[tauri::command]
+fn supports_app_update() -> bool {
+    cfg!(any(target_os = "windows", target_os = "macos"))
+}
+#[tauri::command]
+fn open_app_releases() -> Result<()> {
+    #[cfg(target_os = "windows")]
+    let opener = "explorer.exe";
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let opener = "xdg-open";
+    media::command(opener)
+        .arg("https://github.com/Hessel2333/RallyCut/releases/latest")
+        .spawn()
+        .map_err(error)?;
+    Ok(())
 }
 #[tauri::command]
 fn open_output(s: State<AppState>) -> Result<()> {
@@ -846,6 +868,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            supports_app_update,
+            open_app_releases,
             publication::publication_snapshot,
             publication::publication_login,
             publication::publication_poll_login,

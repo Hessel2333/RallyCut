@@ -32,6 +32,6 @@ npx tauri build --bundles nsis -- --locked
 
 ## macOS 下载包（v0.6.0 起）
 
-提供 Apple 芯片（aarch64）DMG、`.app.tar.gz` 和 `SHA256SUMS-macos.txt`。Mac 包使用本地临时签名（ad-hoc），未使用 Developer ID 分发签名，也未公证；系统可能阻止首次打开。没有配置 Mac 自动更新，需手动下载安装。Intel Mac 暂不提供安装包。
+提供 Apple 芯片（aarch64）DMG、`.app.tar.gz` 和 `SHA256SUMS-macos.txt`。Mac 包使用本地临时签名（ad-hoc），未使用 Developer ID 分发签名，也未公证；系统可能阻止首次打开。v0.6.0 的已发布清单尚无 Mac 自动更新包。后续发布流程会使用现有 Tauri 密钥签名 Mac 更新归档，并在公开版本前合并 `darwin-aarch64` 更新信息；应用保留自动检查、下载及确认安装流程。Intel Mac 暂不提供安装包。
 
-macOS 构建从同一发布标签生成；版本、包签名完整性检查通过后才上传。现有 Windows 更新签名与更新清单流程保持不变。
+macOS 构建从同一发布标签生成；版本、包签名完整性检查通过后才上传。必须直接复制 Tauri 生成的 `.app.tar.gz` 与 `.sig`，不能重新压缩已签名归档。最终发布步骤保留 Windows 条目并加入 Mac 条目，缺少 Mac 归档或签名会阻止公开发布。Tauri 更新签名独立于 Developer ID 和公证，不代表已通过 Apple 分发认证。

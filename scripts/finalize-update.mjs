@@ -31,6 +31,21 @@ export function directDownloadManifest(manifest, assets, repository) {
   return result;
 }
 
+export function addMacUpdate(manifest, assets, repository, signature) {
+  const name = `RallyCut_${manifest.version.replace(/^v/, "")}_aarch64.app.tar.gz`;
+  const archive = assets.find(asset => asset.name === name);
+  const signatureAsset = assets.find(asset => asset.name === `${name}.sig`);
+  if (!archive || !signatureAsset || !signature.trim()) {
+    throw new Error("Mac updater archive and signature are required before publication");
+  }
+  const result = structuredClone(manifest);
+  result.platforms["darwin-aarch64"] = {
+    url: archive.browser_download_url,
+    signature: signature.trim(),
+  };
+  return directDownloadManifest(result, assets, repository);
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const repo = process.env.GITHUB_REPOSITORY;
   const id = process.env.RELEASE_ID;
@@ -40,7 +55,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "rallycut-manifest-"));
   const file = path.join(directory, "latest.json");
   execFileSync(gh, ["release", "download", release.tag_name, "--repo", repo, "--pattern", "latest.json", "--dir", directory]);
-  const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+  let manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (process.env.MACOS_UPDATE_DIR) {
+    const name = `RallyCut_${manifest.version.replace(/^v/, "")}_aarch64.app.tar.gz.sig`;
+    const signature = fs.readFileSync(path.join(process.env.MACOS_UPDATE_DIR, name), "utf8");
+    manifest = addMacUpdate(manifest, release.assets, repo, signature);
+  }
   fs.writeFileSync(file, JSON.stringify(directDownloadManifest(manifest, release.assets, repo), null, 2));
   execFileSync(gh, ["release", "upload", release.tag_name, file, "--repo", repo, "--clobber"]);
   console.log("Public updater download URLs verified and uploaded");

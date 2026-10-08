@@ -6,6 +6,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import releaseNotes from "./release-notes.json";
 import {
+  updateErrorMessage,
   AUTO_UPDATE,
   SEEN_VERSION,
   downloadPercent,
@@ -29,6 +30,7 @@ export function UpdateCenter({
   blocked: boolean;
   beforeInstall: () => Promise<void>;
 }) {
+  const [supported, setSupported] = useState<boolean | null>(null);
   const [version, setVersion] = useState("");
   const [auto, setAuto] = useState(
     () => localStorage.getItem(AUTO_UPDATE) !== "false",
@@ -65,6 +67,7 @@ export function UpdateCenter({
   const checkNow = useCallback(
     async (automatic = false) => {
       if (
+        supported !== true ||
         lock.current ||
         ["available", "ready", "installing"].includes(phaseRef.current)
       )
@@ -88,18 +91,25 @@ export function UpdateCenter({
         });
         setPhase("available");
         if (automatic) await download(candidate);
-      } catch {
+      } catch (error) {
         setPhase("error");
-        setMessage("暂时无法获取更新，请检查网络后重试。");
+        setMessage(updateErrorMessage(error));
       } finally {
         lock.current = false;
       }
     },
-    [download],
+    [download, supported],
   );
 
   useEffect(() => {
     let cancelled = false;
+    void invoke<boolean>("supports_app_update")
+      .then((value) => {
+        if (!cancelled) setSupported(value === true);
+      })
+      .catch(() => {
+        if (!cancelled) setMessage("无法读取更新设置，请重新打开应用。");
+      });
     void getVersion()
       .then((v) => {
         if (cancelled) return;
@@ -115,7 +125,7 @@ export function UpdateCenter({
   }, []);
 
   useEffect(() => {
-    if (!auto) return;
+    if (!auto || supported !== true) return;
     const startup = window.setTimeout(() => void checkNow(true), 15000);
     const repeat = window.setInterval(
       () => void checkNow(true),
@@ -125,7 +135,7 @@ export function UpdateCenter({
       clearTimeout(startup);
       clearInterval(repeat);
     };
-  }, [auto, checkNow]);
+  }, [auto, checkNow, supported]);
 
   useEffect(() => {
     if (open || showNotes) {
@@ -215,18 +225,32 @@ export function UpdateCenter({
         ) : (
           <>
             <p>RallyCut {version}</p>
-            <label className="update-toggle">
-              <input
-                type="checkbox"
-                checked={auto}
-                onChange={(e) => {
-                  setAuto(e.target.checked);
-                  localStorage.setItem(AUTO_UPDATE, String(e.target.checked));
-                }}
-              />
-              自动检查并下载更新
-            </label>
-            <p className="muted">启动后及每 4 小时检查一次，安装前由你确认。</p>
+            {supported === true && (
+              <>
+                <label className="update-toggle">
+                  <input
+                    type="checkbox"
+                    checked={auto}
+                    onChange={(e) => {
+                      setAuto(e.target.checked);
+                      localStorage.setItem(
+                        AUTO_UPDATE,
+                        String(e.target.checked),
+                      );
+                    }}
+                  />
+                  自动检查并下载更新
+                </label>
+                <p className="muted">
+                  启动后及每 4 小时检查一次，安装前由你确认。
+                </p>
+              </>
+            )}
+            {supported === false && (
+              <p>
+                当前平台暂不支持自动更新，请前往官方下载页查看新版本并手动安装。
+              </p>
+            )}
             <p role="status" aria-live="polite">
               {
                 {
@@ -263,9 +287,26 @@ export function UpdateCenter({
               <p>请等待当前操作和导出队列完成，再安装更新。</p>
             )}
             <div className="modal-actions">
-              {["idle", "latest", "error"].includes(phase) && (
-                <button onClick={() => void checkNow()}>检查更新</button>
+              {(supported === false || phase === "error") && (
+                <button
+                  onClick={async () => {
+                    try {
+                      await invoke("open_app_releases");
+                      setMessage("");
+                    } catch {
+                      setMessage(
+                        "无法打开浏览器，请访问 github.com/Hessel2333/RallyCut/releases。",
+                      );
+                    }
+                  }}
+                >
+                  前往官方下载页
+                </button>
               )}
+              {supported === true &&
+                ["idle", "latest", "error"].includes(phase) && (
+                  <button onClick={() => void checkNow()}>检查更新</button>
+                )}
               {phase === "available" && (
                 <button
                   className="primary"
@@ -274,9 +315,9 @@ export function UpdateCenter({
                     lock.current = true;
                     try {
                       await download(update.current);
-                    } catch {
+                    } catch (error) {
                       setPhase("error");
-                      setMessage("下载失败，请检查网络后重试。");
+                      setMessage(updateErrorMessage(error));
                     } finally {
                       lock.current = false;
                     }

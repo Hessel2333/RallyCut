@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { downloadPercent, shouldShowReleaseNotes } from "./updates";
+import {
+  downloadPercent,
+  shouldShowReleaseNotes,
+  updateErrorMessage,
+} from "./updates";
 
 describe("release notes", () => {
   it("does not call a first installation an upgrade", () =>
@@ -16,4 +20,27 @@ describe("download progress", () => {
     expect(downloadPercent(25, 100)).toBe(25);
     expect(downloadPercent(200, 100)).toBe(100);
   });
+});
+
+describe("update error messages", () => {
+  it.each([
+    [
+      "the platform `darwin-aarch64` was not found in the response `platforms` object",
+      "尚未提供",
+    ],
+    [
+      "None of the fallback platforms `[darwin-aarch64]` were found in the response `platforms` object",
+      "尚未提供",
+    ],
+    ["signature verification failed", "校验失败"],
+    ["operation timed out", "超时"],
+    ["error sending request", "网络或代理"],
+    ["invalid JSON", "服务暂时不可用"],
+    ["unexpected failure", "未能完成更新"],
+  ])(
+    "classifies %s without treating every failure as a network error",
+    (error, expected) => {
+      expect(updateErrorMessage(new Error(error))).toContain(expected);
+    },
+  );
 });
