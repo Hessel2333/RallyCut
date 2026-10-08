@@ -83,7 +83,9 @@ jobs:
           APPLE_SIGNING_IDENTITY: "-"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri build -- --target aarch64-apple-darwin --bundles app,dmg -- --locked
+        run: >-
+          npm run tauri build -- --target aarch64-apple-darwin --bundles app,dmg
+          --config '{"bundle":{"createUpdaterArtifacts":true}}' -- --locked
       - name: Verify and archive app
         run: |
           APP=src-tauri/target/aarch64-apple-darwin/release/bundle/macos/RallyCut.app
