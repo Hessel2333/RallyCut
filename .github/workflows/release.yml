@@ -61,7 +61,7 @@ jobs:
           RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
         run: node scripts/finalize-update.mjs
   macos:
-    runs-on: macos-latest
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -90,6 +90,7 @@ jobs:
         run: |
           APP=src-tauri/target/aarch64-apple-darwin/release/bundle/macos/RallyCut.app
           /usr/bin/codesign --verify --deep --strict "$APP"
+          test "$(/usr/bin/lipo -archs "$APP/Contents/MacOS/rallycut")" = "arm64"
           /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist"
           mkdir -p release-artifacts
           VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).version')
