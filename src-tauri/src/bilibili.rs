@@ -600,6 +600,7 @@ mod tests {
         let db = Store::open(&path).unwrap();
         let draft = PublicationDraft {
             id: "draft".into(),
+            session_ids: vec![],
             revision: 1,
             account_id: Some("42".into()),
             title: "test".into(),
@@ -709,6 +710,7 @@ mod tests {
         db.lock().unwrap().put("artifact", "a", &artifact).unwrap();
         let draft = PublicationDraft {
             id: "d".into(),
+            session_ids: vec![],
             revision: 1,
             account_id: Some("42".into()),
             title: "test".into(),

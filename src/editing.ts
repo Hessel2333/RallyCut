@@ -1,6 +1,20 @@
 import type { Asset, Match, Preset } from "./types";
 import { bounds, locate, timecode, totalUs, trimChapters } from "./timeline";
 
+export type ShortClipSelection = { start_us: number; end_us: number | null };
+
+export function finishShortClip(start: number, end: number, total: number) {
+  if (
+    !Number.isSafeInteger(start) ||
+    !Number.isSafeInteger(end) ||
+    start < 0 ||
+    end > total
+  )
+    throw Error("短片范围超出当前拍摄记录");
+  if (end <= start) throw Error("请将画面定位到短片开头之后，再结束短片");
+  return { start_us: start, end_us: end };
+}
+
 export const sharePreset: Preset = {
   codec: "h264",
   width: 1920,

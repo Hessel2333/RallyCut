@@ -3,6 +3,7 @@ import {
   chapterText,
   crossingPairs,
   focusWindow,
+  finishShortClip,
   resizedMatch,
   sharePreset,
   sourceBounds,
@@ -25,6 +26,23 @@ const match: Match = {
   ],
 };
 describe("editing boundaries and chapters", () => {
+  it("accepts a user-selected clip duration without imposing a ten second limit", () => {
+    expect(finishShortClip(3e6, 20e6, 120e6)).toEqual({
+      start_us: 3e6,
+      end_us: 20e6,
+    });
+    expect(finishShortClip(119e6, 120e6, 120e6)).toEqual({
+      start_us: 119e6,
+      end_us: 120e6,
+    });
+  });
+  it("rejects an end before the start, empty clips and invalid source positions", () => {
+    expect(() => finishShortClip(3e6, 2e6, 120e6)).toThrow("开头之后");
+    expect(() => finishShortClip(3e6, 3e6, 120e6)).toThrow("开头之后");
+    expect(() => finishShortClip(-1, 1e6, 120e6)).toThrow("范围超出");
+    expect(() => finishShortClip(3e6, 121e6, 120e6)).toThrow("范围超出");
+    expect(() => finishShortClip(0, 1.5, 120e6)).toThrow("范围超出");
+  });
   it("an exact end boundary belongs to the preceding source, a start to the next", () => {
     expect(sourceBounds(assets, 60e6, true)).toEqual({ start: 0, end: 60e6 });
     expect(sourceBounds(assets, 60e6)).toEqual({ start: 60e6, end: 120e6 });

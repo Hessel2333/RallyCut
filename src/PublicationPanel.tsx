@@ -9,7 +9,12 @@ import {
   type UploadPart,
 } from "./publicationTypes";
 import { CoverPicker } from "./CoverPicker";
-import type { Preset } from "./types";
+import {
+  draftSessionIds,
+  scopedDrafts,
+  scopeSessions,
+} from "./publicationScope";
+import type { Job, Preset, Session } from "./types";
 
 function uploadSize(bytes: number) {
   const units = ["B", "KiB", "MiB", "GiB"];
@@ -26,7 +31,8 @@ export function PublicationPanel({
   open,
   close,
   sessionId,
-  selected,
+  sessions,
+  jobs,
   preset,
   beforeCreate,
   guardRef,
@@ -35,7 +41,8 @@ export function PublicationPanel({
   open: boolean;
   close: () => void;
   sessionId: string;
-  selected: string[];
+  sessions: Session[];
+  jobs: Job[];
   preset: Preset;
   beforeCreate: () => Promise<void>;
   guardRef: MutableRefObject<(action: () => void) => void>;
@@ -61,6 +68,10 @@ export function PublicationPanel({
   const [qrLoading, setQrLoading] = useState(false);
   const [loginState, setLoginState] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
+  const [scopeKey, setScopeKey] = useState(
+    sessionId ? `session:${sessionId}` : "unassigned",
+  );
+  const [standaloneCover, setStandaloneCover] = useState("");
   const [confirm, setConfirm] = useState(false);
   const [transition, setTransition] = useState<(() => void) | null>(null);
   const [coverTime, setCoverTime] = useState(0);
@@ -70,12 +81,41 @@ export function PublicationPanel({
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const dirtyRef = useRef(dirty);
+  const editorRef = useRef<HTMLDivElement>(null);
   dirtyRef.current = dirty;
   const active = working || snapshot.active;
   const publication = snapshot.publications.find(
     (p) => p.draft_id === draft?.id,
   );
   const locked = active || !!publication;
+  const sources = scopeSessions(scopeKey, sessions);
+  const sourceIds = sources.map((s) => s.id);
+  const dates = [...new Set(sessions.map((s) => s.date))].sort().reverse();
+  const records = [...sessions].sort(
+    (a, b) => b.date.localeCompare(a.date) || a.name.localeCompare(b.name),
+  );
+  const visibleDrafts = scopedDrafts(
+    scopeKey,
+    sessions,
+    snapshot.drafts,
+    snapshot.artifacts,
+    jobs,
+  );
+  const visibleArtifacts = snapshot.artifacts.filter((a) =>
+    scopeKey === "unassigned"
+      ? !a.session_id
+      : sourceIds.includes(a.session_id || ""),
+  );
+  const coverSessionIds = draft
+    ? draftSessionIds(draft, snapshot.artifacts, jobs)
+    : sourceIds;
+  const scopeTitle =
+    sources.length === 1
+      ? `${sources[0].date} · ${sources[0].name}`
+      : sources.length
+        ? `${sources[0].date} · ${sources.length} 条拍摄记录`
+        : "其他草稿与成片";
+  const matchCount = sources.reduce((n, s) => n + s.matches.length, 0);
   const partsUploaded =
     !!draft?.parts.length &&
     draft.parts.every((p) =>
@@ -193,17 +233,49 @@ export function PublicationPanel({
     }
   };
   const selectDraft = (next: PublicationDraft) => {
+    draftRef.current = next;
+    dirtyRef.current = false;
     setDraft(next);
     setSaved(JSON.stringify(next));
     setConfirm(false);
     setError("");
+    setManualAid("");
+    setManualConfirmed(false);
   };
+  useEffect(() => {
+    editorRef.current?.scrollTo(0, 0);
+  }, [draft?.id, scopeKey]);
+  useEffect(() => {
+    if (open && !draftRef.current && visibleDrafts.length)
+      selectDraft(visibleDrafts[0]);
+  }, [open, scopeKey, snapshot.drafts, sessions]);
+  useEffect(() => {
+    if (!dirtyRef.current && sessionId) {
+      setScopeKey(`session:${sessionId}`);
+      draftRef.current = undefined;
+      setDraft(undefined);
+      setSaved("");
+      setPicked([]);
+      setStandaloneCover("");
+    }
+  }, [sessionId]);
   const protect = (action: () => void) => {
     if (confirm || transition) return;
     if (dirty) setTransition(() => action);
     else action();
   };
   guardRef.current = protect;
+  const changeScope = (key: string) =>
+    protect(() => {
+      setScopeKey(key);
+      draftRef.current = undefined;
+      setDraft(undefined);
+      setSaved("");
+      setPicked([]);
+      setStandaloneCover("");
+      setError("");
+      setCoverTime(0);
+    });
   const save = async () => {
     if (!draft) return;
     const value = await invoke<PublicationDraft>("publication_save", { draft });
@@ -216,11 +288,14 @@ export function PublicationPanel({
       .filter(Boolean);
     selectDraft({
       id: crypto.randomUUID(),
+      session_ids: sourceIds,
       revision: 0,
       account_id: null,
-      title: artifacts[0]?.segment?.name || "羽毛球比赛",
+      title: sources.length
+        ? `${sources[0].date} ${sources.length === 1 ? sources[0].name : "日常羽毛球"}`
+        : artifacts[0]?.segment?.name || "羽毛球比赛",
       description: "",
-      cover_path: "",
+      cover_path: standaloneCover,
       category: 0,
       tags: "羽毛球",
       visibility: "public",
@@ -350,32 +425,41 @@ export function PublicationPanel({
         {error && <p role="alert">{error}</p>}
         <div className="publication-layout">
           <aside className="publication-library">
-            <button
-              disabled={active || !selected.length}
-              onClick={() =>
-                protect(
-                  () =>
-                    void run(async () => {
-                      await beforeCreate();
-                      const value = await invoke<PublicationDraft>(
-                        "publication_from_matches",
-                        { sessionId, matchIds: selected, preset },
-                      );
-                      selectDraft(value);
-                    }),
-                )
-              }
-            >
-              用所选比赛创建草稿（{selected.length}）
-            </button>
+            <label className="publication-source">
+              拍摄记录或日期
+              <select
+                aria-label="拍摄记录或日期"
+                value={scopeKey}
+                disabled={active}
+                onChange={(e) => changeScope(e.target.value)}
+              >
+                <optgroup label="拍摄记录">
+                  {records.map((s) => (
+                    <option key={s.id} value={`session:${s.id}`}>
+                      {s.date} · {s.name}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="日期">
+                  {dates.map((date) => (
+                    <option key={date} value={`date:${date}`}>
+                      {date} · 当天全部记录
+                    </option>
+                  ))}
+                </optgroup>
+                <option value="unassigned">其他草稿与成片</option>
+              </select>
+            </label>
             <p className="muted">
-              缺少的成片按当前 {preset.codec === "hevc" ? "H.265" : "H.264"}{" "}
-              预设导出
+              {sources.length
+                ? `${matchCount} 场比赛`
+                : "选择拍摄记录，查看当天稿件"}
             </p>
             <h3>投稿草稿</h3>
-            {snapshot.drafts.map((d) => (
+            {visibleDrafts.map((d) => (
               <button
                 key={d.id}
+                aria-pressed={draft?.id === d.id}
                 className={draft?.id === d.id ? "active" : ""}
                 onClick={() => protect(() => selectDraft(d))}
               >
@@ -390,74 +474,129 @@ export function PublicationPanel({
                 </small>
               </button>
             ))}
-            <h3>已有成片</h3>
+            {!visibleDrafts.length && <p className="muted">暂无投稿草稿</p>}
             <button
-              disabled={active}
+              disabled={active || !matchCount}
               onClick={() =>
-                void run(async () => {
-                  const path = await invoke<string | null>("choose_path", {
-                    kind: "file",
-                  });
-                  if (path)
-                    await invoke("publication_import_artifact", {
-                      path,
-                      artifactId: null,
-                    });
-                })
+                protect(
+                  () =>
+                    void run(async () => {
+                      await beforeCreate();
+                      const value = await invoke<PublicationDraft>(
+                        "publication_from_sessions",
+                        { sessionIds: sourceIds, preset },
+                      );
+                      if (standaloneCover) value.cover_path = standaloneCover;
+                      selectDraft(value);
+                      if (standaloneCover) setSaved("");
+                    }),
+                )
               }
             >
-              导入既有成片
+              新建草稿并准备成片
             </button>
-            {snapshot.artifacts.map((a) => (
-              <div className="artifact-row" key={a.id}>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={picked.includes(a.id)}
-                    onChange={(e) =>
-                      setPicked((ids) =>
-                        e.target.checked
-                          ? [...ids, a.id]
-                          : ids.filter((id) => id !== a.id),
-                      )
-                    }
-                  />
-                  {a.segment?.name || a.path.split(/[\\/]/).pop()}
-                  <small>
-                    {a.codec.toUpperCase()} · {(a.duration_us / 1e6).toFixed(1)}{" "}
-                    秒{a.availability !== "available" ? " · 不可用" : ""}
-                  </small>
-                </label>
-                <button
-                  title="重新定位成片"
-                  disabled={active}
-                  onClick={() =>
-                    void run(async () => {
-                      const path = await invoke<string | null>("choose_path", {
-                        kind: "file",
+            <small className="muted">
+              使用所选记录中的全部比赛，已完成的成片会优先复用。
+            </small>
+            <details className="publication-existing">
+              <summary>选择已有成片（{visibleArtifacts.length}）</summary>
+              <button
+                disabled={active}
+                onClick={() =>
+                  void run(async () => {
+                    const path = await invoke<string | null>("choose_path", {
+                      kind: "file",
+                    });
+                    if (path)
+                      await invoke("publication_import_artifact", {
+                        path,
+                        artifactId: null,
+                        sessionId: sourceIds[0] || null,
                       });
-                      if (path)
-                        await invoke("publication_import_artifact", {
-                          path,
-                          artifactId: a.id,
-                        });
-                    })
-                  }
-                >
-                  定位
-                </button>
-              </div>
-            ))}
-            <button
-              disabled={!picked.length || active}
-              onClick={() => protect(createFromArtifacts)}
-            >
-              用勾选成片新建草稿
-            </button>
+                  })
+                }
+              >
+                导入既有成片
+              </button>
+              {visibleArtifacts.map((a) => (
+                <div className="artifact-row" key={a.id}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={picked.includes(a.id)}
+                      onChange={(e) =>
+                        setPicked((ids) =>
+                          e.target.checked
+                            ? [...ids, a.id]
+                            : ids.filter((id) => id !== a.id),
+                        )
+                      }
+                    />
+                    {a.segment?.name || a.path.split(/[\\/]/).pop()}
+                    <small>
+                      {a.codec.toUpperCase()} ·{" "}
+                      {(a.duration_us / 1e6).toFixed(1)} 秒
+                      {a.availability !== "available" ? " · 不可用" : ""}
+                    </small>
+                  </label>
+                  <button
+                    title="重新定位成片"
+                    disabled={active || a.availability === "available"}
+                    onClick={() =>
+                      void run(async () => {
+                        const path = await invoke<string | null>(
+                          "choose_path",
+                          {
+                            kind: "file",
+                          },
+                        );
+                        if (path)
+                          await invoke("publication_import_artifact", {
+                            path,
+                            artifactId: a.id,
+                          });
+                      })
+                    }
+                  >
+                    定位
+                  </button>
+                </div>
+              ))}
+              <button
+                disabled={!picked.length || active}
+                onClick={() => protect(createFromArtifacts)}
+              >
+                用勾选成片新建草稿
+              </button>
+            </details>
           </aside>
-          <div className="publication-editor">
+          <div className="publication-editor" ref={editorRef}>
+            <div className="publication-context">
+              <h3>{scopeTitle}</h3>
+              {draft && <span>{draft.parts.length} P</span>}
+            </div>
             {!draft ? (
-              <p>选择比赛或已有成片，创建投稿草稿。</p>
+              <>
+                <div className="publication-empty">
+                  <h3>
+                    {sources.length ? "准备当天的投稿" : "选择一份投稿草稿"}
+                  </h3>
+                  <p>
+                    {sources.length
+                      ? "打开已有草稿，或使用当天比赛新建。封面也可以单独导出，用于网页版投稿。"
+                      : "按拍摄记录或日期查看稿件，也可以导入已有成片。"}
+                  </p>
+                </div>
+                {sources.length > 0 && (
+                  <CoverPicker
+                    key={scopeKey}
+                    sessionIds={sourceIds}
+                    value={standaloneCover}
+                    disabled={active}
+                    change={setStandaloneCover}
+                  />
+                )}
+              </>
             ) : (
               <>
                 <div className="publication-state">
@@ -467,7 +606,7 @@ export function PublicationPanel({
                 {(draft.error || publication?.error) && (
                   <p role="alert">{publication?.error || draft.error}</p>
                 )}
-                <fieldset disabled={locked}>
+                <fieldset disabled={locked} className="publication-metadata">
                   <label>
                     标题
                     <input
@@ -516,20 +655,16 @@ export function PublicationPanel({
                     </select>
                   </label>
                   <p>可见性：公开（确认提交后由平台审核）</p>
+                </fieldset>
+                <CoverPicker
+                  key={draft.id}
+                  sessionIds={coverSessionIds}
+                  value={draft.cover_path}
+                  disabled={locked}
+                  change={(path) => edit({ cover_path: path })}
+                />
+                <fieldset disabled={locked}>
                   <div className="publication-cover">
-                    <button
-                      onClick={() =>
-                        void run(async () => {
-                          const path = await invoke<string | null>(
-                            "choose_path",
-                            { kind: "file" },
-                          );
-                          if (path) { await invoke("cover_preview", { path }).catch(e => { if (!String(e).includes("not found")) throw e; }); edit({ cover_path: path }); }
-                        })
-                      }
-                    >
-                      选择封面
-                    </button>
                     <label>
                       首 P 封面时间（秒）
                       <input
@@ -566,7 +701,6 @@ export function PublicationPanel({
                       </>
                     )}
                   </div>
-                  <CoverPicker sessionId={sessionId} value={draft.cover_path} disabled={locked} change={(path) => edit({ cover_path: path })} />
                   <h3>分 P 顺序</h3>
                   {draft.parts.map((part, i) => {
                     const upload = snapshot.uploads.find(

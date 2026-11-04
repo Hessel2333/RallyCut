@@ -2,7 +2,7 @@ use crate::{engine, model::*, AppState};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{atomic::AtomicBool, Arc},
 };
 use tauri::{Manager, State};
@@ -18,16 +18,30 @@ pub struct CoverCandidate {
 }
 
 #[tauri::command]
-pub fn cover_candidates(s: State<AppState>, session_id: String) -> Result<Vec<CoverCandidate>> {
-    let mut items =
-        s.db.lock()
-            .unwrap()
-            .list::<CoverCandidate>("cover_candidate")?;
-    items.sort_by_key(|c| c.session_id != session_id);
-    Ok(items)
+pub fn cover_candidates(
+    s: State<AppState>,
+    session_id: Option<String>,
+    session_ids: Option<Vec<String>>,
+) -> Result<Vec<CoverCandidate>> {
+    let ids = session_ids.unwrap_or_else(|| session_id.into_iter().collect());
+    Ok(s.db
+        .lock()
+        .unwrap()
+        .list::<CoverCandidate>("cover_candidate")?
+        .into_iter()
+        .filter(|c| ids.contains(&c.session_id))
+        .collect())
 }
 
 pub fn image_data(path: &Path) -> Result<String> {
+    let (bytes, mime) = read_image(path)?;
+    Ok(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+fn read_image(path: &Path) -> Result<(Vec<u8>, &'static str)> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|_| "封面图片不存在，请重新选择")?;
     let mut bytes = Vec::new();
@@ -44,10 +58,114 @@ pub fn image_data(path: &Path) -> Result<String> {
     } else {
         return Err("请选择 JPEG 或 PNG 封面".into());
     };
-    Ok(format!(
-        "data:{mime};base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    ))
+    Ok((bytes, mime))
+}
+
+/// Publish a complete image without replacing a previous cover.
+fn export_image(source: &Path, directory: &Path) -> Result<PathBuf> {
+    use std::io::Write;
+    let (bytes, mime) = read_image(source)?;
+    let extension = if mime == "image/png" { "png" } else { "jpg" };
+    std::fs::create_dir_all(directory).map_err(crate::error)?;
+    let temporary = directory.join(format!(".cover-{}.tmp", id()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(crate::error)?;
+        file.write_all(&bytes).map_err(crate::error)?;
+        file.sync_all().map_err(crate::error)?;
+        drop(file);
+        for number in 1..=9999 {
+            let name = if number == 1 {
+                format!("封面.{extension}")
+            } else {
+                format!("封面-{number}.{extension}")
+            };
+            let destination = directory.join(name);
+            if destination.exists() {
+                if read_image(&destination).is_ok_and(|(existing, _)| existing == bytes) {
+                    return Ok(destination);
+                }
+                continue;
+            }
+            match crate::media::commit_no_replace(&temporary, &destination) {
+                Ok(()) => return Ok(destination),
+                Err(_) if destination.exists() => {
+                    if read_image(&destination).is_ok_and(|(existing, _)| existing == bytes) {
+                        return Ok(destination);
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err("日期文件夹中的同名封面过多，请整理后重试".into())
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    result
+}
+
+#[tauri::command]
+pub async fn export_cover(
+    app: tauri::AppHandle,
+    path: String,
+    session_id: String,
+) -> Result<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = app.state::<AppState>();
+        let known = {
+            let db = s.db.lock().unwrap();
+            db.list::<CoverCandidate>("cover_candidate")?
+                .iter()
+                .any(|c| c.path == path)
+                || db
+                    .list::<crate::publication::PublicationDraft>("publication_draft")?
+                    .iter()
+                    .any(|d| d.cover_path == path)
+        };
+        if !known {
+            crate::allowed(&s, Path::new(&path))?;
+        }
+        let directory = session_output(&s, &session_id)?;
+        Ok(export_image(Path::new(&path), &directory)?
+            .to_string_lossy()
+            .into_owned())
+    })
+    .await
+    .map_err(crate::error)?
+}
+
+fn session_output(s: &AppState, session_id: &str) -> Result<PathBuf> {
+    let session: Session = s.db.lock().unwrap().get("session", session_id)?;
+    let config = crate::settings(s);
+    if config.output.is_empty() {
+        return Err("请先在导出设置中选择输出目录".into());
+    }
+    Ok(Path::new(&config.output).join(export_folder(
+        &config.folder_template,
+        &session.date,
+        &session.name,
+    )?))
+}
+
+#[tauri::command]
+pub fn open_session_output(s: State<AppState>, session_id: String) -> Result<()> {
+    let directory = session_output(&s, &session_id)?;
+    if !directory.is_dir() {
+        return Err("日期文件夹尚未创建，请先导出封面或视频".into());
+    }
+    #[cfg(target_os = "windows")]
+    let opener = "explorer.exe";
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let opener = "xdg-open";
+    crate::media::command(opener)
+        .arg(directory)
+        .spawn()
+        .map_err(crate::error)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -199,5 +317,42 @@ mod tests {
             .set_len(10 * 1024 * 1024 + 1)
             .unwrap();
         assert!(image_data(&p).is_err());
+    }
+
+    #[test]
+    fn export_cover_uses_date_folder_and_preserves_existing_images() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("candidate.jpg");
+        let first = [0xff, 0xd8, 0xff, 1];
+        let second = [0xff, 0xd8, 0xff, 2];
+        std::fs::write(&source, first).unwrap();
+        let folder = root
+            .path()
+            .join(export_folder("", "2026-09-26", "练习").unwrap());
+        let original = export_image(&source, &folder).unwrap();
+        assert_eq!(original, folder.join("封面.jpg"));
+        assert_eq!(export_image(&source, &folder).unwrap(), original);
+        std::fs::write(&source, second).unwrap();
+        let changed = export_image(&source, &folder).unwrap();
+        assert_eq!(changed, folder.join("封面-2.jpg"));
+        assert_eq!(std::fs::read(original).unwrap(), first);
+        assert_eq!(std::fs::read(changed).unwrap(), second);
+        assert_eq!(std::fs::read(source).unwrap(), second);
+        assert_eq!(std::fs::read_dir(folder).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn export_detects_image_format_and_rejects_invalid_sources_before_creating_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("misnamed.jpg");
+        let folder = root.path().join("date");
+        std::fs::write(&source, b"not an image").unwrap();
+        assert!(export_image(&source, &folder).is_err());
+        assert!(!folder.exists());
+        std::fs::write(&source, b"\x89PNG\r\n\x1a\nimage").unwrap();
+        assert_eq!(
+            export_image(&source, &folder).unwrap().file_name().unwrap(),
+            "封面.png"
+        );
     }
 }

@@ -5,10 +5,6 @@ import {
   FolderOpen,
   Plus,
   Settings as SettingsIcon,
-  Play,
-  Pause,
-  SkipBack,
-  SkipForward,
   Scissors,
   Download,
   PanelLeftClose,
@@ -23,6 +19,17 @@ import {
   Trash2,
   LoaderCircle,
   AlertCircle,
+  Maximize2,
+  ArrowLeftToLine,
+  ArrowRightToLine,
+  SquareDashed,
+  ZoomIn,
+  ZoomOut,
+  Focus,
+  ScanSearch,
+  Camera,
+  ImageDown,
+  Waypoints,
 } from "lucide-react";
 import type {
   Snapshot,
@@ -40,7 +47,6 @@ import {
   locate,
   bounds,
   timecode,
-  parseTime,
   totalUs,
   orderedMatches,
   appendSegment,
@@ -54,6 +60,8 @@ import {
   SpeedMenu,
   NamePicker,
   outsideDialog,
+  ClockInput,
+  EditorIconButton,
 } from "./EditorControls";
 import {
   adjacentFrame,
@@ -65,7 +73,9 @@ import { SessionSaves } from "./sessionSaves";
 import { PublicationPanel } from "./PublicationPanel";
 import { ChapterEditor } from "./ChapterEditor";
 import { ContinuityPanel, useContinuity } from "./ContinuityPanel";
-import { sharePreset, sourceBounds, focusWindow, resizedMatch, crossingPairs } from "./editing";
+import { sharePreset, sourceBounds, focusWindow, resizedMatch, crossingPairs, finishShortClip, type ShortClipSelection } from "./editing";
+import { EditorTransport } from "./EditorTransport";
+import { EditorMenu } from "./EditorMenu";
 import { UpdateCenter } from "./UpdateCenter";
 
 const defaultPreset: Preset = {
@@ -96,38 +106,6 @@ const phaseName: Record<string, string> = {
   flushing: "正在完成写入",
 };
 const dateNow = () => new Date().toLocaleDateString("sv-SE");
-function ClockInput({
-  value,
-  onChange,
-  label,
-}: {
-  value: number;
-  onChange: (v: number) => void;
-  label: string;
-}) {
-  const [text, setText] = useState(timecode(value));
-  useEffect(() => setText(timecode(value)), [value]);
-  return (
-    <label className="clock-input">
-      <span>{label}</span>
-      <input
-        aria-label={label}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onBlur={() => {
-          try {
-            onChange(parseTime(text));
-          } catch {
-            setText(timecode(value));
-          }
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") e.currentTarget.blur();
-        }}
-      />
-    </label>
-  );
-}
 export default function App() {
   const [quickTags, setQuickTags] = useState<string[]>(() =>
     readPreference("rallycut-tags", defaultTags),
@@ -268,6 +246,9 @@ export default function App() {
   const [zoom, setZoom] = useState(1);
   const [focusRange, setFocusRange] = useState<{ start: number; end: number } | null>(null);
   const [shareClip, setShareClip] = useState<{ start_us: number; end_us: number } | null>(null);
+  const [shortClip, setShortClip] = useState<ShortClipSelection | null>(null);
+  const [shortClipError, setShortClipError] = useState("");
+  const [editMode, setEditMode] = useState<"matches" | "short">("matches");
   const [chapterId, setChapterId] = useState<string | null>(null);
   const [continuityOpen, setContinuityOpen] = useState(false);
   const [mergeAction, setMergeAction] = useState<{ pairs: string[]; action: () => void } | null>(null);
@@ -358,6 +339,12 @@ export default function App() {
     .filter(Boolean) ?? []) as Asset[];
   const total = totalUs(assets);
   const current = assets[sourceIndex];
+  const shortClipSource = assets.map(a => `${a.id}:${a.duration_us}`).join("|");
+  useEffect(() => {
+    setShortClip(null);
+    setShareClip(null);
+    setShortClipError("");
+  }, [sessionId, shortClipSource]);
   const { reviews, retry: retryContinuity } = useContinuity(sessionId, assets);
   const timelineStart = focusRange?.start ?? 0;
   const timelineEnd = focusRange?.end ?? total;
@@ -568,6 +555,41 @@ export default function App() {
       else v.pause();
     }
   };
+  const shortClipFrame = () => {
+    const media = video.current;
+    if (!media || media.readyState < 2 || media.seeking || pending.current)
+      throw Error("请等待画面加载完成后再标记短片");
+    return Math.max(0, Math.min(total, offset + Math.round(media.currentTime * 1e6)));
+  };
+  const startShortClip = () => {
+    try {
+      const start_us = shortClipFrame();
+      if (start_us >= total) throw Error("请在视频结束前选择短片开头");
+      setShortClip({ start_us, end_us: null });
+      setShortClipError("");
+    } catch (e) { setShortClipError(String(e)); }
+  };
+  const endShortClip = () => {
+    if (!shortClip) return;
+    try {
+      const clip = finishShortClip(shortClip.start_us, shortClipFrame(), total);
+      video.current?.pause();
+      setShortClip(clip);
+      setShortClipError("");
+    } catch (e) { setShortClipError(String(e)); }
+  };
+  const changeShortStart = (start_us: number) => {
+    try {
+      if (start_us < 0 || start_us >= total) throw Error("请在视频范围内选择短片开头");
+      setShortClip(shortClip?.end_us != null ? finishShortClip(start_us, shortClip.end_us, total) : { start_us, end_us: null });
+      setShortClipError("");
+    } catch (e) { setShortClipError(String(e)); }
+  };
+  const changeShortEnd = (end_us: number) => {
+    if (!shortClip) return;
+    try { setShortClip(finishShortClip(shortClip.start_us, end_us, total)); setShortClipError(""); }
+    catch (e) { setShortClipError(String(e)); }
+  };
   const addMatch = (end = markOut) => {
     if (!session) return;
     try {
@@ -646,7 +668,7 @@ export default function App() {
       if (
         modal || publicationOpen ||
         document.querySelector("dialog[open]") ||
-        target.closest("input,textarea,select,[contenteditable=true]")
+        target.closest("input,textarea,select,[contenteditable=true],[role=menu],.name-options")
       )
         return;
       if (e.key === "Escape") {
@@ -655,7 +677,8 @@ export default function App() {
       }
       if (e.key === "Delete") {
         e.preventDefault();
-        deleteFocused();
+        if (editMode === "short") { setShortClip(null); setShortClipError(""); }
+        else deleteFocused();
         return;
       }
       if (["d", "f"].includes(e.key.toLowerCase())) {
@@ -665,16 +688,16 @@ export default function App() {
       }
       if (e.ctrlKey && e.key.toLowerCase() === "z") {
         e.preventDefault();
-        history(e.shiftKey);
+        if (editMode === "matches") history(e.shiftKey);
         return;
       }
       if (e.code === "Space") {
         e.preventDefault();
         toggle();
-      } else if (e.key.toLowerCase() === "i") changeStart(playhead);
-      else if (e.key.toLowerCase() === "o") changeEnd(playhead);
-      else if (e.key === "Enter" && !editingId) addMatch();
-      else if (e.key.toLowerCase() === "s") {
+      } else if (e.key.toLowerCase() === "i") { e.preventDefault(); if (editMode === "short") startShortClip(); else changeStart(playhead); }
+      else if (e.key.toLowerCase() === "o") { e.preventDefault(); if (editMode === "short") endShortClip(); else changeEnd(playhead); }
+      else if (e.key === "Enter" && !editingId && editMode === "matches") addMatch();
+      else if (e.key.toLowerCase() === "s" && editMode === "matches") {
         e.preventDefault();
         cutHere();
       } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
@@ -981,6 +1004,19 @@ export default function App() {
   const editBounds = editingMatch ? bounds(assets, editingMatch.ranges) : null;
   const shownStart = editBounds?.start ?? markIn;
   const shownEnd = editBounds?.end ?? markOut;
+  const shortMode = editMode === "short";
+  const activeStart = shortMode ? shortClip?.start_us ?? null : shownStart;
+  const activeEnd = shortMode ? shortClip?.end_us ?? null : shownEnd;
+  const shortDuration = shortClip ? Math.max(0, (shortClip.end_us ?? playhead) - shortClip.start_us) : 0;
+  const openShortExport = () => {
+    if (shortClip?.end_us == null) return;
+    const clip = { start_us: shortClip.start_us, end_us: shortClip.end_us };
+    transition(() => {
+      setPreset({ ...sharePreset }); setPresetId(""); setPresetName("");
+      setShareClip(clip); setModal("export");
+    });
+  };
+  const manageTags = () => { setTagText(quickTags.join("\n")); setTagEditor(true); };
   const changeStart = (value: number) =>
     editingMatch
       ? updateBoundary(editingMatch, value, shownEnd)
@@ -1171,6 +1207,25 @@ export default function App() {
     el.addEventListener("pointermove", move);
     el.addEventListener("pointerup", end);
     el.addEventListener("pointercancel", end);
+  };
+  const saveCover = async (exportToFolder = false) => {
+    const media = video.current;
+    if (!current || !media || media.readyState < 2) return;
+    media.pause();
+    const assetId = current.id;
+    const timeUs = Math.round(media.currentTime * 1e6);
+    const sourceSessionId = sessionId;
+    setCoverBusy(true);
+    setCoverNotice("");
+    try {
+      const candidate = await invoke<{ path: string }>("capture_cover_candidate", { sessionId: sourceSessionId, assetId, timeUs });
+      if (exportToFolder) {
+        const path = await invoke<string>("export_cover", { path: candidate.path, sessionId: sourceSessionId });
+        setCoverNotice(`封面已导出：${path}`);
+      } else setCoverNotice("已加入封面备选");
+    } catch (e) {
+      setError(String(e).includes("not found") ? "请在当前投稿处理完成后重新启动新版应用，再保存封面。" : String(e));
+    } finally { setCoverBusy(false); }
   };
   const activeJobs =
     data?.jobs.filter(
@@ -1380,24 +1435,6 @@ export default function App() {
                 ? `${current.name} · ${sourceIndex + 1} / ${assets.length}`
                 : ""}
             </span>
-            {current && (
-              <button
-                className="preview-button"
-                disabled={!!previewTask}
-                onClick={() => prepare("proxy")}
-              >
-                生成代理
-              </button>
-            )}
-            {current && (
-              <button
-                className="preview-button"
-                disabled={!!previewTask}
-                onClick={() => prepare("thumbnail")}
-              >
-                缩略图
-              </button>
-            )}
             {previewTask && (
               <button
                 className="preview-button"
@@ -1418,6 +1455,15 @@ export default function App() {
               {saved}
               {saved === "保存失败" && <button onClick={() => void run(() => saves.flush(true))}>重试保存</button>}
             </span>
+            <div className="editor-cover-actions" role="group" aria-label="封面操作">
+              <EditorIconButton label="加入封面备选" disabled={!current?.available || seeking || !!seekError || coverBusy} onClick={() => void saveCover()}><Camera size={16} /></EditorIconButton>
+              <EditorIconButton label="导出封面" disabled={!current?.available || seeking || !!seekError || coverBusy} onClick={() => void saveCover(true)}><ImageDown size={16} /></EditorIconButton>
+            </div>
+            <EditorMenu label="素材操作" actions={[
+              { label: "生成代理", group: "预览", disabled: !current || !!previewTask, select: () => prepare("proxy") },
+              { label: "缩略图", group: "预览", disabled: !current || !!previewTask, select: () => prepare("thumbnail") },
+              { label: "原始素材信息", group: "素材", disabled: !current, select: () => setInfoAsset(current) },
+            ]} />
           </div>
           <div
             className="viewer"
@@ -1430,6 +1476,7 @@ export default function App() {
                 });
             }}
           >
+            {coverNotice && <span className="editor-notice" role="status">{coverNotice}</span>}
             {seekError && <div className="seek-status" role="alert">{seekError}<button onClick={() => { seek(playhead, false); video.current?.load(); }}>重试定位</button></div>}
             {showSeekStatus && current?.available && (
               <span className="seek-status seeking" role="status">
@@ -1538,78 +1585,30 @@ export default function App() {
               </div>
             )}
           </div>
-          <div className="transport">
-            <span className="time-readout">
-              {timecode(playhead)}
-              <span> / {timecode(total)}</span>
-            </span>
-            <div className="play-controls">
-              <button title="上一帧（D）" disabled={!current} onClick={() => stepFrame(-1)}>‹ 帧</button>
-              <button
-                title={`后退 ${stepSeconds} 秒`}
-                disabled={!current}
-                onClick={() => seek(playhead - stepSeconds * 1e6)}
-              >
-                <SkipBack size={17} />
-              </button>
-              <button
-                className="play"
-                title="播放 / 暂停（Space）"
-                disabled={!current}
-                onClick={toggle}
-              >
-                {playing ? <Pause size={19} /> : <Play size={19} />}
-              </button>
-              <button
-                title={`前进 ${stepSeconds} 秒`}
-                disabled={!current}
-                onClick={() => seek(playhead + stepSeconds * 1e6)}
-              >
-                <SkipForward size={17} />
-              </button>
-            </div>
-            <button title="下一帧（F）" disabled={!current} onClick={() => stepFrame(1)}>帧 ›</button>
-            <button disabled={!current?.available || seeking || !!seekError || coverBusy}
-              onClick={() => {
-                const media = video.current;
-                if (!current || !media || media.readyState < 2) return;
-                media.pause();
-                const assetId = current.id;
-                const timeUs = Math.round(media.currentTime * 1e6);
-                setCoverBusy(true); setCoverNotice("");
-                void invoke("capture_cover_candidate", { sessionId, assetId, timeUs })
-                  .then(() => setCoverNotice("已加入封面备选"))
-                  .catch(e => setError(String(e).includes("not found") ? "请在当前投稿处理完成后重新启动新版应用，再添加封面备选。" : String(e)))
-                  .finally(() => setCoverBusy(false));
-              }}>{coverBusy ? "正在保存封面…" : "加入封面备选"}</button>
-            {coverNotice && <span className="muted" role="status">{coverNotice}</span>}
-            <SpeedMenu
-              value={speed}
-              change={(n) => {
-                setSpeed(n);
-                if (video.current) video.current.playbackRate = n;
-              }}
-            />
-          </div>
-          <section className="timeline-panel">
-            <div className="timeline-toolbar">
-              <strong>{focusRange ? "片段精调" : "统一时间线"}</strong>
-              {assets.length > 1 && <button onClick={() => setContinuityOpen(true)}>检查衔接 · {Object.keys(reviews).length}/{assets.length - 1}</button>}
-              <button disabled={!total} onClick={() => focusClip(shownEnd > shownStart ? shownStart : playhead, shownEnd > shownStart ? shownEnd : playhead + 10e6)}>放大选区</button>
-              <button disabled={!total} onClick={() => focusClip(playhead - 5e6, playhead + 5e6)}>精调 15 秒</button>
-              {focusRange && <button onClick={() => { setFocusRange(null); setZoom(1); }}>查看全片</button>}
-              <label>
-                缩放{" "}
-                <input
-                  type="range"
-                  aria-label="时间线缩放"
-                  min="1"
-                  max="8"
-                  step="0.5"
-                  value={zoom}
-                  onChange={(e) => setZoom(+e.target.value)}
-                />
-              </label>
+          <section className="timeline-panel" aria-label={shortMode ? "短片选取" : "比赛选取"}>
+            <div className="timeline-toolbar editor-context">
+              <div className="editor-modes" role="group" aria-label="剪辑模式" onKeyDown={event => { if (event.key === "Enter") event.stopPropagation(); }}>
+                <button aria-label="比赛模式" aria-pressed={!shortMode} onClick={() => setEditMode("matches")}>比赛</button>
+                <button aria-label="短片模式" aria-pressed={shortMode} onClick={() => setEditMode("short")}>短片</button>
+              </div>
+              {!shortMode && <NamePicker key={editingMatch?.id ?? sessionId} label="下一段标签" value={editingMatch?.name ?? draftTag} tags={quickTags} manage={manageTags}
+                change={name => editingMatch ? saveMatches(session!.matches.map(m => m.id === editingId ? { ...m, name } : m)) : setDraftTag(name)} />}
+              <span className="editor-selection-caption">
+                {shortMode
+                  ? shortClip ? `${shortClip.end_us == null ? "选取中" : "已选"} · ${(shortDuration / 1e6).toFixed(2)} 秒${shortClip.end_us == null ? " · 待选择结尾" : ""}` : "I 设定开头 · O 选择结尾"
+                  : editingMatch ? `编辑比赛 · ${((shownEnd - shownStart) / 1e6).toFixed(2)} 秒` : shownEnd > shownStart ? `选区 · ${((shownEnd - shownStart) / 1e6).toFixed(2)} 秒` : "在比赛结束处按 S 分段"}
+              </span>
+              <div className="editor-context-actions" onKeyDown={event => { if (event.key === "Enter") event.stopPropagation(); }}>
+                <span className="editor-position" aria-label="播放位置">{timecode(playhead)} <span>/ {timecode(total)}</span></span>
+                {shortMode ? <>
+                  <button className="primary editor-main-action" disabled={shortClip?.end_us == null} onClick={openShortExport}>导出短片</button>
+                  {shortClip && <button className="editor-menu-trigger" aria-label="取消短片" title="取消短片" onClick={() => { setShortClip(null); setShortClipError(""); }}><X size={15} /></button>}
+                </> : <button className="primary editor-main-action" disabled={!current || !editingMatch && markOut <= markIn}
+                  onClick={() => editingMatch ? chooseGap(shownEnd, shownEnd) : addMatch()}>
+                  {editingMatch ? "完成编辑" : "添加一局"}
+                </button>}
+                <SpeedMenu value={speed} change={value => { setSpeed(value); if (video.current) video.current.playbackRate = value; }} />
+              </div>
             </div>
             <div className="timeline-scroll" ref={timelineScroll}>
               <div
@@ -1639,7 +1638,7 @@ export default function App() {
                         setDeleteTarget({ kind: "asset", id: a.id })
                       }
                       style={{ ...clipped(start, end), position: "absolute", height: "100%" }}
-                      onDoubleClick={(e) => { e.stopPropagation(); chooseGap(start, end); focusClip(start, end); }}
+                      onDoubleClick={(e) => { e.stopPropagation(); if (shortMode) seek(start, false); else chooseGap(start, end); focusClip(start, end); }}
                       className={i === sourceIndex ? "current" : ""}
                     >
                       {previews.find(
@@ -1662,7 +1661,7 @@ export default function App() {
                   })}
                 </div>
                 <div className="match-track">
-                  {timelineGaps(assets, session?.matches ?? []).filter(g => visibleRange(g.start, g.end)).map((g) => (
+                  {!shortMode && timelineGaps(assets, session?.matches ?? []).filter(g => visibleRange(g.start, g.end)).map((g) => (
                     <button
                       key={g.start}
                       className="gap-block"
@@ -1693,7 +1692,7 @@ export default function App() {
                           scrubTimeline(e);
                         }}
                         onClick={() => {
-                          setEditingId(m.id);
+                          if (!shortMode) setEditingId(m.id);
                           setDeleteTarget({ kind: "match", id: m.id });
                         }}
                         style={clipped(b.start, b.end)}
@@ -1702,6 +1701,7 @@ export default function App() {
                           className="segment-handle start"
                           style={{ visibility: b.start < timelineStart ? "hidden" : "visible" }}
                           aria-label={`调整${m.name}开始`}
+                          disabled={shortMode}
                           onClick={(e) => e.stopPropagation()}
                           onPointerDown={(e) => dragBoundary(e, m, "start")}
                         />
@@ -1709,6 +1709,7 @@ export default function App() {
                           className="segment-handle end"
                           style={{ visibility: b.end > timelineEnd ? "hidden" : "visible" }}
                           aria-label={`调整${m.name}结束`}
+                          disabled={shortMode}
                           onClick={(e) => e.stopPropagation()}
                           onPointerDown={(e) => dragBoundary(e, m, "end")}
                         />
@@ -1727,144 +1728,43 @@ export default function App() {
                     />
                     <div
                       className="draft-range"
-                      style={visibleRange(shownStart, shownEnd) ? clipped(shownStart, shownEnd) : { display: "none" }}
+                      style={!shortMode && visibleRange(shownStart, shownEnd) ? clipped(shownStart, shownEnd) : { display: "none" }}
                     />
+                    {shortMode && shortClip && visibleRange(shortClip.start_us, shortClip.end_us ?? playhead) && (
+                      <div className="short-clip-range" aria-hidden="true"
+                        style={clipped(shortClip.start_us, Math.max(shortClip.start_us, shortClip.end_us ?? playhead))} />
+                    )}
                     <input
                       className="boundary start"
-                      style={{ visibility: shownStart < timelineStart || shownStart > timelineEnd ? "hidden" : "visible" }}
-                      title="拖动开始边界"
-                      aria-label="拖动开始边界"
+                      style={{ visibility: activeStart == null || activeStart < timelineStart || activeStart > timelineEnd ? "hidden" : "visible" }}
+                      title={shortMode ? "拖动短片开始边界" : "拖动开始边界"}
+                      aria-label={shortMode ? "拖动短片开始边界" : "拖动开始边界"}
                       type="range"
                       min={timelineStart}
                       max={timelineEnd}
                       step="1000"
-                      value={shownStart}
+                      value={activeStart ?? 0}
                       onPointerDown={(e) => e.stopPropagation()}
-                      onChange={(e) => changeStart(+e.target.value)}
+                      onChange={(e) => shortMode ? changeShortStart(+e.target.value) : changeStart(+e.target.value)}
                     />
                     <input
                       className="boundary end"
-                      style={{ visibility: shownEnd < timelineStart || shownEnd > timelineEnd ? "hidden" : "visible" }}
-                      title="拖动结束边界"
-                      aria-label="拖动结束边界"
+                      style={{ visibility: activeEnd == null || activeEnd < timelineStart || activeEnd > timelineEnd ? "hidden" : "visible" }}
+                      title={shortMode ? "拖动短片结束边界" : "拖动结束边界"}
+                      aria-label={shortMode ? "拖动短片结束边界" : "拖动结束边界"}
                       type="range"
                       min={timelineStart}
                       max={timelineEnd}
                       step="1000"
-                      value={shownEnd}
+                      value={activeEnd ?? 0}
                       onPointerDown={(e) => e.stopPropagation()}
-                      onChange={(e) => changeEnd(+e.target.value)}
+                      onChange={(e) => shortMode ? changeShortEnd(+e.target.value) : changeEnd(+e.target.value)}
                     />
                   </>
                 )}
               </div>
             </div>
-            <div className="mark-toolbar">
-              {editingMatch && (
-                <>
-                  <span>编辑：{editingMatch.name}</span>
-                  <button onClick={() => chooseGap(shownEnd, shownEnd)}>
-                    完成编辑
-                  </button>
-                </>
-              )}
-              <button
-                className="primary"
-                disabled={!current}
-                onClick={cutHere}
-                title="在播放位置分段（S）"
-              >
-                在此分段 <kbd>S</kbd>
-              </button>
-              <button disabled={!current} onClick={() => changeStart(playhead)}>
-                设为开始 <kbd>I</kbd>
-              </button>
-              <button disabled={!current} title="开始对齐所选区间首个原片的开头" onClick={() => changeStart(sourceBounds(assets, shownStart).start)}>原片开头</button>
-              <ClockInput
-                label="开始时间"
-                value={shownStart}
-                onChange={changeStart}
-              />
-              <button disabled={!current} onClick={() => changeEnd(playhead)}>
-                设为结束 <kbd>O</kbd>
-              </button>
-              <button disabled={!current} title="结束对齐所选区间最后一个原片的结尾" onClick={() => changeEnd(sourceBounds(assets, shownEnd > shownStart ? shownEnd : playhead, shownEnd > shownStart).end)}>原片结尾</button>
-              <ClockInput
-                label="结束时间"
-                value={shownEnd}
-                onChange={changeEnd}
-              />
-              <button
-                className="primary"
-                disabled={!current || !!editingMatch || markOut <= markIn}
-                onClick={() => addMatch()}
-              >
-                <Plus size={15} />
-                添加一局
-              </button>
-            </div>
-            <div className="editing-actions source-actions">
-              <button disabled={!current} onClick={() => {
-                if (editingMatch) updateBoundary(editingMatch, offset, offset + current.duration_us);
-                else { setMarkIn(offset); setMarkOut(offset + current.duration_us); }
-              }}>选取当前原片</button>
-              <button disabled={!current} onClick={() => seek(offset, false)}>跳到原片开头</button>
-              <button disabled={!current} onClick={() => seek(offset + current.duration_us - 1000, false)}>跳到原片结尾</button>
-              <button disabled={!session || shownEnd <= shownStart} onClick={() => transition(() => {
-                setPreset({ ...sharePreset }); setPresetId(""); setPresetName("");
-                setShareClip({ start_us: shownStart, end_us: shownEnd }); setModal("export");
-              })}>分享选区 · 1080p</button>
-              <button disabled={!current || playhead >= total} onClick={() => transition(() => {
-                setPreset({ ...sharePreset }); setPresetId(""); setPresetName("");
-                setShareClip({ start_us: playhead, end_us: Math.min(total, playhead + 10e6) }); setModal("export");
-              })}>从此处截取 10 秒</button>
-              {shownEnd > shownStart && <small>选区 {((shownEnd - shownStart) / 1e6).toFixed(2)} 秒</small>}
-            </div>
-            <div className="tag-toolbar">
-              <button
-                onClick={() => {
-                  setTagText(quickTags.join("\n"));
-                  setTagEditor(true);
-                }}
-              >
-                管理标签
-              </button>
-              <span>{editingMatch ? "片段标签" : "下一段标签"}</span>
-              <input
-                aria-label="下一段标签"
-                value={editingMatch?.name ?? draftTag}
-                onChange={(e) =>
-                  editingMatch
-                    ? saveMatches(
-                        session!.matches.map((m) =>
-                          m.id === editingId
-                            ? { ...m, name: e.target.value }
-                            : m,
-                        ),
-                      )
-                    : setDraftTag(e.target.value)
-                }
-              />
-              {quickTags.map((tag) => (
-                <button
-                  key={tag}
-                  className={
-                    (editingMatch?.name ?? draftTag) === tag ? "active" : ""
-                  }
-                  onClick={() =>
-                    editingMatch
-                      ? saveMatches(
-                          session!.matches.map((m) =>
-                            m.id === editingId ? { ...m, name: tag } : m,
-                          ),
-                        )
-                      : setDraftTag(tag)
-                  }
-                >
-                  {tag}
-                </button>
-              ))}
-            </div>
+            {shortMode && shortClipError && <p className="editor-feedback" role="alert">{shortClipError}</p>}
           </section>
         </main>
         <aside className="matches">
@@ -1988,7 +1888,7 @@ export default function App() {
                       <span>{timecode(b.end - b.start).slice(3, 8)}</span>
                     </div>
                     <div className="editing-actions">
-                      <button onClick={() => { setEditingId(m.id); focusClip(b.start, b.end); }}>精调</button>
+                      <button onClick={() => { setEditMode("matches"); setEditingId(m.id); focusClip(b.start, b.end); }}>精调</button>
                       <button onClick={() => setChapterId(m.id)}>章节{m.chapters?.length ? ` · ${m.chapters.length}` : ""}</button>
                       {m.ranges.length > 1 && <button onClick={() => setContinuityOpen(true)}>跨 {m.ranges.length} 个原片</button>}
                     </div>
@@ -2045,6 +1945,48 @@ export default function App() {
             </button>
           </div>
         </aside>
+        <div className="editor-dock">
+            <div className="editor-quick-tools" role="group" aria-label="时间线快捷操作">
+              <div className="editor-tool-group" role="group" aria-label="选区操作">
+                <EditorIconButton label="起点对齐原片开头" className="start-tool" disabled={!current} onClick={() => shortMode ? changeShortStart(sourceBounds(assets, activeStart ?? playhead).start) : changeStart(sourceBounds(assets, shownStart).start)}><ArrowLeftToLine size={16} /></EditorIconButton>
+                <EditorIconButton label="选取当前原片" disabled={!current} onClick={() => {
+                  if (shortMode) { setShortClip(finishShortClip(offset, offset + current.duration_us, total)); setShortClipError(""); }
+                  else if (editingMatch) updateBoundary(editingMatch, offset, offset + current.duration_us);
+                  else { setMarkIn(offset); setMarkOut(offset + current.duration_us); }
+                }}><SquareDashed size={16} /></EditorIconButton>
+                <EditorIconButton label="终点对齐原片结尾" className="end-tool" disabled={!current || shortMode && !shortClip} onClick={() => shortMode ? changeShortEnd(sourceBounds(assets, activeEnd ?? playhead, activeEnd != null).end) : changeEnd(sourceBounds(assets, shownEnd > shownStart ? shownEnd : playhead, shownEnd > shownStart).end)}><ArrowRightToLine size={16} /></EditorIconButton>
+              </div>
+              {!shortMode && <div className="editor-tool-group" role="group" aria-label="比赛操作">
+                <EditorIconButton label="在此分段" shortcut="S" disabled={!current} onClick={cutHere}><Scissors size={16} /></EditorIconButton>
+                <EditorIconButton label="分享选区 · 1080p" disabled={!session || shownEnd <= shownStart} onClick={() => transition(() => {
+                  setPreset({ ...sharePreset }); setPresetId(""); setPresetName("");
+                  setShareClip({ start_us: shownStart, end_us: shownEnd }); setModal("export");
+                })}><Download size={16} /></EditorIconButton>
+              </div>}
+            </div>
+            <EditorTransport mode={editMode} start={activeStart} end={activeEnd}
+              hasClip={!!shortClip} completeClip={shortClip?.end_us != null}
+              playing={playing} step={stepSeconds}
+              disabled={!current} markerDisabled={!current?.available || seeking || !!seekError}
+              markStart={() => shortMode ? startShortClip() : changeStart(playhead)}
+              markEnd={() => shortMode ? endShortClip() : changeEnd(playhead)}
+              changeStart={shortMode ? changeShortStart : changeStart} changeEnd={shortMode ? changeShortEnd : changeEnd}
+              toggle={toggle} frame={stepFrame} jump={direction => seek(playhead + direction * stepSeconds * 1e6)}
+              jumpSource={edge => seek(edge === "start" ? offset : offset + current.duration_us - 1000, false)} />
+            <div className="editor-quick-tools editor-secondary-tools" role="group" aria-label="时间线视图与衔接">
+              <div className="editor-tool-group editor-view-tools" role="group" aria-label="时间线视图">
+                <EditorIconButton label="缩小时间线" disabled={!total || zoom <= 1} onClick={() => setZoom(value => Math.max(1, value - .5))}><ZoomOut size={16} /></EditorIconButton>
+                <input aria-label="时间线缩放" title={`时间线缩放 ${zoom.toFixed(1)}×`} type="range" min="1" max="8" step="0.5" value={zoom} disabled={!total} onChange={event => setZoom(+event.target.value)} />
+                <EditorIconButton label="放大时间线" disabled={!total || zoom >= 8} onClick={() => setZoom(value => Math.min(8, value + .5))}><ZoomIn size={16} /></EditorIconButton>
+                <EditorIconButton label="放大选区" className="editor-view-break" disabled={!total || shortMode && shortClip?.end_us == null} onClick={() => shortMode && shortClip?.end_us != null ? focusClip(shortClip.start_us, shortClip.end_us) : focusClip(shownEnd > shownStart ? shownStart : playhead, shownEnd > shownStart ? shownEnd : playhead + 10e6)}><Focus size={16} /></EditorIconButton>
+                <EditorIconButton label="精调 15 秒" disabled={!total} onClick={() => focusClip(playhead - 5e6, playhead + 5e6)}><ScanSearch size={16} /></EditorIconButton>
+                <EditorIconButton label="查看全片" disabled={!total || !focusRange && zoom === 1} onClick={() => { setFocusRange(null); setZoom(1); if (timelineScroll.current) timelineScroll.current.scrollLeft = 0; }}><Maximize2 size={16} /></EditorIconButton>
+              </div>
+              <div className="editor-tool-group" role="group" aria-label="素材衔接">
+                <EditorIconButton label="检查衔接" disabled={assets.length < 2} onClick={() => setContinuityOpen(true)}><Waypoints size={16} /></EditorIconButton>
+              </div>
+            </div>
+        </div>
       </div>
       <footer className="statusbar">
         <button onClick={() => setQueue(!queue)}>
@@ -2419,7 +2361,7 @@ export default function App() {
         const b = bounds(assets, m.ranges);
         return <ChapterEditor match={m} duration={b.end - b.start} position={playhead - b.start} close={() => setChapterId(null)} seek={us => seek(b.start + us, false)} change={chapters => saveMatches(session.matches.map(x => x.id === m.id ? { ...x, chapters } : x))} />;
       })()}
-      <PublicationPanel open={publicationOpen} close={() => setPublicationOpen(false)} sessionId={sessionId} selected={selected} preset={preset} beforeCreate={() => saves.flush()} guardRef={publicationGuard} activeChanged={setPublicationActive} />
+      <PublicationPanel open={publicationOpen} close={() => setPublicationOpen(false)} sessionId={sessionId} sessions={data?.sessions ?? []} jobs={data?.jobs ?? []} preset={preset} beforeCreate={() => saves.flush()} guardRef={publicationGuard} activeChanged={setPublicationActive} />
       {exitError !== null && <LocalDialog title="标记尚未保存" close={() => setExitError(null)}>
         <p role="alert">{exitError}</p>
         <div className="modal-actions">

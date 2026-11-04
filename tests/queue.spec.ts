@@ -433,18 +433,21 @@ test("editor shortcuts, menus, tags and panel resizing", async ({ page }) => {
   );
   await page.locator(".timeline").focus();
   await page.keyboard.press("ArrowRight");
-  await expect(page.locator(".transport")).toContainText("00:00:04.000");
+  await expect(page.locator(".editor-position")).toContainText("00:00:04.000");
   await page.keyboard.press("f");
-  await expect(page.locator(".transport")).toContainText("00:00:04.016");
+  await expect(page.locator(".editor-position")).toContainText("00:00:04.016");
   await page.keyboard.press("d");
-  await expect(page.locator(".transport")).toContainText("00:00:04.000");
+  await expect(page.locator(".editor-position")).toContainText("00:00:04.000");
   const timeline = (await page.locator(".timeline").boundingBox())!;
   await page.mouse.move(timeline.x + timeline.width * 0.1, timeline.y + 8);
   await page.mouse.down();
   await page.mouse.move(timeline.x + timeline.width * 0.6, timeline.y + 8);
   await page.mouse.up();
   expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("");
-  await expect(page.locator(".transport")).toContainText("00:00:18.");
+  await expect.poll(async () => {
+    const text = (await page.locator(".editor-position").textContent())!.split("/")[0].trim();
+    return text.split(":").reduce((seconds, part) => seconds * 60 + Number(part), 0);
+  }).toBeCloseTo(18, 2);
   await page.getByRole("button", { name: "播放速度", exact: true }).click();
   await page.getByRole("menuitemradio", { name: "1.5×", exact: true }).click();
   await expect(
@@ -456,12 +459,14 @@ test("editor shortcuts, menus, tags and panel resizing", async ({ page }) => {
     page.getByRole("dialog", { name: "原始素材信息" }),
   ).toContainText("20,000 kbps");
   await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "下一段标签选择标签", exact: true }).click();
   await page.getByRole("button", { name: "管理标签" }).click();
   await page.getByLabel("快捷标签列表").fill("访谈\n旅行\n访谈");
   await page.getByRole("button", { name: "保存标签" }).click();
+  await page.getByRole("button", { name: "下一段标签选择标签", exact: true }).click();
   await expect(
     page
-      .locator(".tag-toolbar")
+      .locator(".editor-context .name-options")
       .getByRole("button", { name: "旅行", exact: true }),
   ).toBeVisible();
   expect(
@@ -491,14 +496,11 @@ test("editor shortcuts, menus, tags and panel resizing", async ({ page }) => {
     .locator(".name-options")
     .getByRole("button", { name: "旅行", exact: true })
     .click();
-  await expect(page.getByLabel("比赛1名称", { exact: true })).toHaveValue(
-    "旅行",
-  );
+  await expect(page.getByRole("button", { name: "比赛1名称选择标签", exact: true })).toContainText("旅行");
+  await page.getByRole("button", { name: "比赛1名称选择标签", exact: true }).dblclick();
   await page.getByLabel("比赛1名称", { exact: true }).fill("自由名称");
   await page.getByLabel("比赛1名称", { exact: true }).press("Tab");
-  await expect(page.getByLabel("比赛1名称", { exact: true })).toHaveValue(
-    "自由名称",
-  );
+  await expect(page.getByRole("button", { name: "比赛1名称选择标签", exact: true })).toContainText("自由名称");
   await page.locator(".match-item").click();
   await page.keyboard.press("Delete");
   await expect(page.locator(".match-item")).toHaveCount(0);
@@ -517,7 +519,7 @@ test("editor shortcuts, menus, tags and panel resizing", async ({ page }) => {
   await page.getByRole("button", { name: "关闭", exact: true }).click();
   await page.locator(".timeline").focus();
   await page.keyboard.press("ArrowRight");
-  await expect(page.locator(".transport")).toContainText("00:00:02.000");
+  await expect(page.locator(".editor-position")).toContainText("00:00:02.000");
 });
 
 test("outside close prompts to save export settings; failed save keeps draft", async ({
@@ -555,6 +557,7 @@ test("outside close prompts to save export settings; failed save keeps draft", a
   await prompt.getByRole("button", { name: "保存并关闭" }).click();
   await expect(prompt).toHaveCount(0);
   await expect(page.locator(".export-modal")).toHaveCount(0);
+  await page.getByRole("button", { name: "下一段标签选择标签", exact: true }).click();
   await page.getByRole("button", { name: "管理标签" }).click();
   await page.getByLabel("快捷标签列表").fill("采访");
   await page.mouse.click(2, 2);

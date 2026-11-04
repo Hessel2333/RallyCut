@@ -126,6 +126,8 @@ pub struct DraftPart {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PublicationDraft {
     pub id: String,
+    #[serde(default)]
+    pub session_ids: Vec<String>,
     pub revision: u64,
     pub account_id: Option<String>,
     pub title: String,
@@ -414,6 +416,7 @@ pub async fn publication_import_artifact(
     app: tauri::AppHandle,
     path: String,
     artifact_id: Option<String>,
+    session_id: Option<String>,
 ) -> Result<ExportArtifact> {
     tauri::async_runtime::spawn_blocking(move || {
         let s = app.state::<AppState>();
@@ -433,6 +436,11 @@ pub async fn publication_import_artifact(
                 availability: "available".into(),
                 ..old
             };
+        } else if let Some(session_id) = session_id {
+            s.db.lock()
+                .unwrap()
+                .get::<Session>("session", &session_id)?;
+            artifact.session_id = Some(session_id);
         }
         s.db.lock()
             .unwrap()
@@ -450,28 +458,66 @@ pub async fn publication_from_matches(
     match_ids: Vec<String>,
     preset: Preset,
 ) -> Result<PublicationDraft> {
+    create_draft(app, vec![(session_id, Some(match_ids))], preset).await
+}
+
+#[tauri::command]
+pub async fn publication_from_sessions(
+    app: tauri::AppHandle,
+    session_ids: Vec<String>,
+    preset: Preset,
+) -> Result<PublicationDraft> {
+    let mut seen = std::collections::HashSet::new();
+    let sources = session_ids
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .map(|id| (id, None))
+        .collect();
+    create_draft(app, sources, preset).await
+}
+
+async fn create_draft(
+    app: tauri::AppHandle,
+    sources: Vec<(String, Option<Vec<String>>)>,
+    preset: Preset,
+) -> Result<PublicationDraft> {
     tauri::async_runtime::spawn_blocking(move || {
         let s = app.state::<AppState>();
         let operation = Operation::begin(&app, "prepare")?;
-        let (session, assets, mut artifacts, jobs) = {
+        let (sessions, assets, mut artifacts, jobs, numbers) = {
             let db = s.db.lock().unwrap();
             (
-                db.get::<Session>("session", &session_id)?,
+                sources
+                    .iter()
+                    .map(|(id, _)| db.get::<Session>("session", id))
+                    .collect::<Result<Vec<_>>>()?,
                 db.list::<Asset>("asset")?,
                 db.list::<ExportArtifact>("artifact")?,
                 db.list::<Job>("job")?,
+                db.match_numbers()?,
             )
         };
-        let matches: Vec<_> = session
-            .matches
+        let session = sessions.first().ok_or("请选择拍摄记录或日期")?;
+        if sessions.iter().any(|s| s.date != session.date) {
+            return Err("请选择同一天的拍摄记录".into());
+        }
+        let mut matches: Vec<_> = sessions
             .iter()
-            .filter(|m| match_ids.contains(&m.id))
+            .zip(&sources)
+            .flat_map(|(session, (_, ids))| {
+                session
+                    .matches
+                    .iter()
+                    .filter(move |m| ids.as_ref().is_none_or(|ids| ids.contains(&m.id)))
+                    .map(move |m| (session, m))
+            })
             .collect();
+        matches.sort_by_key(|(_, m)| numbers.get(&m.id).copied().unwrap_or(usize::MAX));
         if matches.is_empty() {
             return Err("请选择比赛".into());
         }
         let mut parts = Vec::new();
-        for segment in matches {
+        for (source_session, segment) in matches {
             let fingerprint = engine::fingerprint(segment, &assets, &preset);
             let mut found = None;
             for a in artifacts
@@ -554,7 +600,7 @@ pub async fn publication_from_matches(
                 } else {
                     crate::enqueue(
                         s.clone(),
-                        session_id.clone(),
+                        source_session.id.clone(),
                         vec![segment.id.clone()],
                         preset.clone(),
                         Some(false),
@@ -579,9 +625,18 @@ pub async fn publication_from_matches(
         }
         let draft = PublicationDraft {
             id: id(),
+            session_ids: sessions.iter().map(|s| s.id.clone()).collect(),
             revision: 1,
             account_id: None,
-            title: format!("{} {}", session.date, session.name),
+            title: format!(
+                "{} {}",
+                session.date,
+                if sessions.len() == 1 {
+                    session.name.as_str()
+                } else {
+                    "日常羽毛球"
+                }
+            ),
             description: String::new(),
             cover_path: String::new(),
             category: 0,

@@ -170,6 +170,7 @@ test("publication draft order, upload separation, confirmation and dirty close",
     "请用哔哩哔哩 App 扫码",
   );
   await panel.getByRole("button", { name: "检查登录", exact: true }).click();
+  await panel.getByText("选择已有成片（2）", { exact: true }).click();
   await panel.getByLabel("第1局").check();
   await panel.getByLabel("第2局").check();
   await panel.getByRole("button", { name: "用勾选成片新建草稿" }).click();

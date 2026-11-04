@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
-type Candidate = { id: string; path: string; name: string; time_us: number };
+type Candidate = {
+  id: string;
+  session_id?: string;
+  path: string;
+  name: string;
+  time_us: number;
+};
 export function CoverImage({ path, alt }: { path: string; alt: string }) {
   const [src, setSrc] = useState("");
   const [error, setError] = useState("");
@@ -36,21 +42,37 @@ export function CoverImage({ path, alt }: { path: string; alt: string }) {
   );
 }
 export function CoverPicker({
-  sessionId,
+  sessionIds,
   value,
   disabled,
   change,
 }: {
-  sessionId: string;
+  sessionIds: string[];
   value: string;
   disabled: boolean;
   change: (path: string) => void;
 }) {
   const [items, setItems] = useState<Candidate[]>([]);
   const [error, setError] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const [exported, setExported] = useState<{
+    path: string;
+    source: string;
+    scope: string;
+    sessionId: string;
+  }>();
+  const scope = JSON.stringify(sessionIds);
+  const result =
+    exported?.source === value && exported.scope === scope
+      ? exported
+      : undefined;
   useEffect(() => {
     let alive = true;
-    void invoke<Candidate[]>("cover_candidates", { sessionId })
+    setItems([]);
+    setError("");
+    void invoke<Candidate[]>("cover_candidates", {
+      sessionIds: JSON.parse(scope),
+    })
       .then((v) => {
         if (alive) {
           setItems(v ?? []);
@@ -63,7 +85,7 @@ export function CoverPicker({
     return () => {
       alive = false;
     };
-  }, [sessionId]);
+  }, [scope]);
   return (
     <section className="cover-picker" aria-label="投稿封面">
       {value && (
@@ -71,10 +93,73 @@ export function CoverPicker({
           <CoverImage key={value} path={value} alt="投稿封面预览" />
         </div>
       )}
+      <div className="cover-export-actions">
+        <button
+          type="button"
+          disabled={disabled || exporting}
+          onClick={async () => {
+            setError("");
+            try {
+              const path = await invoke<string | null>("choose_path", {
+                kind: "file",
+              });
+              if (path) {
+                await invoke("cover_preview", { path });
+                change(path);
+              }
+            } catch (e) {
+              setError(String(e));
+            }
+          }}
+        >
+          选择封面图片
+        </button>
+        <button
+          type="button"
+          disabled={!value || !sessionIds.length || exporting}
+          onClick={async () => {
+            setExporting(true);
+            setError("");
+            setExported(undefined);
+            try {
+              const sessionId =
+                items.find((item) => item.path === value)?.session_id ||
+                sessionIds[0];
+              const path = await invoke<string>("export_cover", {
+                path: value,
+                sessionId,
+              });
+              setExported({ path, source: value, scope, sessionId });
+            } catch (e) {
+              setError(String(e));
+            } finally {
+              setExporting(false);
+            }
+          }}
+        >
+          {exporting ? "正在导出封面…" : "导出封面到日期文件夹"}
+        </button>
+        {result && (
+          <button
+            type="button"
+            onClick={() => {
+              void invoke("open_session_output", {
+                sessionId: result.sessionId,
+              }).catch((e) => setError(String(e)));
+            }}
+          >
+            打开日期文件夹
+          </button>
+        )}
+      </div>
+      {result && (
+        <p className="muted" role="status">
+          封面已导出：{result.path}
+        </p>
+      )}
+      {error && <p role="alert">{error}</p>}
       <h4>封面备选</h4>
-      {error ? (
-        <p className="muted">{error}</p>
-      ) : !items.length ? (
+      {!items.length ? (
         <p className="muted">在剪辑页停在喜欢的画面，点击“加入封面备选”。</p>
       ) : (
         <div className="cover-candidates">
@@ -82,7 +167,7 @@ export function CoverPicker({
             <button
               type="button"
               key={item.id}
-              disabled={disabled}
+              disabled={disabled || exporting}
               aria-label={`选择封面备选：${item.name}`}
               aria-pressed={value === item.path}
               onClick={() => change(item.path)}

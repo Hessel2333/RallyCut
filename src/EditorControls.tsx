@@ -1,5 +1,81 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { ChevronDown } from "lucide-react";
 import type { Asset } from "./types";
+import { parseTime, timecode } from "./timeline";
+
+export function EditorIconButton({
+  label,
+  shortcut,
+  disabled,
+  className = "",
+  onClick,
+  children,
+}: {
+  label: string;
+  shortcut?: string;
+  disabled?: boolean;
+  className?: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className={`editor-icon-button ${className}`}
+      aria-label={label}
+      title={shortcut ? `${label}（${shortcut}）` : label}
+      disabled={disabled}
+      onClick={onClick}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") event.stopPropagation();
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+export function ClockInput({
+  value,
+  onChange,
+  label,
+  disabled = false,
+}: {
+  value: number | null;
+  onChange: (value: number) => void;
+  label: string;
+  disabled?: boolean;
+}) {
+  const format = (value: number | null) =>
+    value === null ? "" : timecode(value);
+  const [text, setText] = useState(format(value));
+  useEffect(() => setText(format(value)), [value]);
+  return (
+    <label className="clock-input">
+      <span>{label}</span>
+      <input
+        aria-label={label}
+        title={label}
+        disabled={disabled}
+        value={text}
+        placeholder="未设定"
+        onChange={(event) => setText(event.target.value)}
+        onBlur={() => {
+          if (!text && value === null) return;
+          try {
+            onChange(parseTime(text));
+            setText(format(value));
+          } catch {
+            setText(format(value));
+          }
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") event.currentTarget.blur();
+        }}
+      />
+    </label>
+  );
+}
 export function outsideDialog(e: React.MouseEvent<HTMLDialogElement>) {
   const r = e.currentTarget.getBoundingClientRect();
   return (
@@ -15,14 +91,42 @@ export function NamePicker({
   value,
   tags,
   change,
+  manage,
 }: {
   label: string;
   value: string;
   tags: string[];
   change: (s: string) => void;
+  manage?: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(value);
   const ref = useRef<HTMLDivElement>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const cancelled = useRef(false);
+  const focusOptions = useRef(false);
+  const beginEditing = () => {
+    cancelled.current = false;
+    setText(value);
+    setOpen(false);
+    setEditing(true);
+  };
+  useEffect(() => {
+    if (editing) {
+      input.current?.focus();
+      input.current?.select();
+    }
+  }, [editing]);
+  useEffect(() => {
+    if (open && focusOptions.current) {
+      ref.current
+        ?.querySelector<HTMLButtonElement>(".name-options button")
+        ?.focus();
+      focusOptions.current = false;
+    }
+  }, [open]);
   useEffect(() => {
     const close = (e: PointerEvent) => {
       if (!ref.current?.contains(e.target as Node)) setOpen(false);
@@ -36,24 +140,96 @@ export function NamePicker({
       ref={ref}
       onKeyDown={(e) => {
         if (e.key === "Escape") {
+          e.preventDefault();
+          if (editing) {
+            cancelled.current = true;
+            setEditing(false);
+          }
           setOpen(false);
           e.stopPropagation();
+          requestAnimationFrame(() => trigger.current?.focus());
+        } else if (
+          open &&
+          ["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)
+        ) {
+          e.preventDefault();
+          e.stopPropagation();
+          const options = [
+            ...ref.current!.querySelectorAll<HTMLButtonElement>(
+              ".name-options button",
+            ),
+          ];
+          const index = options.indexOf(
+            document.activeElement as HTMLButtonElement,
+          );
+          const next =
+            e.key === "Home"
+              ? 0
+              : e.key === "End"
+                ? options.length - 1
+                : (index + (e.key === "ArrowDown" ? 1 : -1) + options.length) %
+                  options.length;
+          options[next]?.focus();
+        } else if (open && e.key === "Tab") {
+          trigger.current?.focus();
+          setOpen(false);
         }
       }}
     >
-      <input
-        aria-label={label}
-        value={value}
-        onChange={(e) => change(e.target.value)}
-      />
-      <button
-        className="name-dropdown"
-        aria-label={label + "选择标签"}
-        aria-expanded={open}
-        onClick={() => setOpen(!open)}
-      >
-        ⌄
-      </button>
+      {editing ? (
+        <input
+          ref={input}
+          aria-label={label}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onBlur={() => {
+            setEditing(false);
+            if (!cancelled.current && text !== value) change(text);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              event.stopPropagation();
+              event.currentTarget.blur();
+              requestAnimationFrame(() => trigger.current?.focus());
+            }
+          }}
+        />
+      ) : (
+        <button
+          ref={trigger}
+          type="button"
+          className="name-trigger"
+          aria-label={label + "选择标签"}
+          title="单击选择标签，双击编辑名称"
+          aria-expanded={open}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ")
+              event.stopPropagation();
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              event.stopPropagation();
+              if (open)
+                ref.current
+                  ?.querySelector<HTMLButtonElement>(".name-options button")
+                  ?.focus();
+              else {
+                focusOptions.current = true;
+                setOpen(true);
+              }
+            } else if (event.key === "F2") {
+              event.preventDefault();
+              event.stopPropagation();
+              beginEditing();
+            }
+          }}
+          onClick={() => setOpen((current) => !current)}
+          onDoubleClick={beginEditing}
+        >
+          <span>{value || "选择标签"}</span>
+          <ChevronDown size={13} aria-hidden="true" />
+        </button>
+      )}
       {open && (
         <div className="name-options" role="group" aria-label="可选标签">
           {tags.length ? (
@@ -63,6 +239,7 @@ export function NamePicker({
                 onClick={() => {
                   change(tag);
                   setOpen(false);
+                  trigger.current?.focus();
                 }}
               >
                 {tag}
@@ -70,6 +247,16 @@ export function NamePicker({
             ))
           ) : (
             <span>暂无标签，可在“管理标签”中添加</span>
+          )}
+          {manage && (
+            <button
+              onClick={() => {
+                setOpen(false);
+                manage();
+              }}
+            >
+              管理标签
+            </button>
           )}
         </div>
       )}
@@ -142,6 +329,10 @@ export function SpeedMenu({
         aria-label="播放速度"
         aria-haspopup="menu"
         aria-expanded={open}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ")
+            event.stopPropagation();
+        }}
         onClick={() => setOpen(!open)}
       >
         {value}× ⌄

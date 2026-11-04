@@ -23,6 +23,7 @@ export type DraftPart = {
 };
 export type PublicationDraft = {
   id: string;
+  session_ids?: string[];
   revision: number;
   account_id: string | null;
   title: string;
